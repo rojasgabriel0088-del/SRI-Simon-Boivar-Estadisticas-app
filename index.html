@@ -1,0 +1,2627 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SRI Simón Bolívar - Control Digital de Rehabilitación</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+
+  <!-- Firebase SDK (Módulos ES) para Acceso de Equipo y Sincronización en la Nube -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import {
+      getAuth,
+      signInAnonymously,
+      signInWithCustomToken,
+      signInWithEmailAndPassword,
+      createUserWithEmailAndPassword,
+      signOut,
+      onAuthStateChanged
+    } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import {
+      getFirestore,
+      doc,
+      getDoc,
+      setDoc,
+      onSnapshot
+    } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'sri-simon-bolivar-default';
+    let firebaseConfig = null;
+    try {
+      firebaseConfig = typeof __firebase_config !== 'undefined' && __firebase_config
+        ? JSON.parse(__firebase_config)
+        : null;
+    } catch (e) {
+      console.error('Error al parsear configuración de nube:', e);
+    }
+
+    const cloudBridge = {
+      enabled: Boolean(firebaseConfig),
+      app: null,
+      auth: null,
+      db: null,
+      appId,
+      currentUser: null,
+      teamProfile: null,
+      unsubPatients: null,
+      unsubAttendance: null,
+      unsubPhysiatrist: null,
+      isApplyingRemote: false
+    };
+
+    window.cloudBridge = cloudBridge;
+
+    const ROOM_ACCESS_KEY = 'sri_simon_bolivar_room_unlocked_v1';
+    const DEFAULT_ROOM_PIN = 'SRI2026';
+
+    function hasRoomPinSession() {
+      try {
+        return sessionStorage.getItem(ROOM_ACCESS_KEY) === '1';
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function setRoomPinSession(active) {
+      try {
+        if (active) {
+          sessionStorage.setItem(ROOM_ACCESS_KEY, '1');
+        } else {
+          sessionStorage.removeItem(ROOM_ACCESS_KEY);
+        }
+      } catch (e) {
+        console.warn('No se pudo actualizar sesión de sala:', e);
+      }
+    }
+
+    function showAuthFallback(show) {
+      const box = document.getElementById('auth-fallback-box');
+      if (!box) return;
+      box.classList.toggle('hidden', !show);
+    }
+
+    function setCloudStatusBadge(text, mode = 'local') {
+      const badge = document.getElementById('cloud-sync-badge');
+      const userLabel = document.getElementById('cloud-user-label');
+      if (!badge) return;
+
+      const styles = {
+        live: 'bg-emerald-500/20 text-emerald-100 border-emerald-300/40',
+        syncing: 'bg-amber-400/20 text-amber-100 border-amber-300/40',
+        locked: 'bg-rose-500/20 text-rose-100 border-rose-300/40',
+        local: 'bg-white/15 text-clinical-100 border-white/20'
+      };
+
+      const safeEscape = typeof window.escapeHtml === 'function' ? window.escapeHtml : (s => String(s));
+      badge.className = `text-[11px] font-bold px-2.5 py-1 rounded-full border flex items-center gap-1.5 ${styles[mode] || styles.local}`;
+      badge.innerHTML = `<i class="fa-solid ${mode === 'live' ? 'fa-cloud-check' : mode === 'locked' ? 'fa-lock' : 'fa-cloud'}"></i><span>${safeEscape(text)}</span>`;
+
+      if (userLabel) {
+        if (cloudBridge.teamProfile?.email) {
+          const rolTxt = cloudBridge.teamProfile.rol ? ` (${cloudBridge.teamProfile.rol})` : '';
+          userLabel.textContent = `${cloudBridge.teamProfile.email}${rolTxt}`;
+          userLabel.classList.remove('hidden');
+        } else if (cloudBridge.currentUser && !cloudBridge.currentUser.isAnonymous && cloudBridge.currentUser.email) {
+          userLabel.textContent = cloudBridge.currentUser.email;
+          userLabel.classList.remove('hidden');
+        } else {
+          userLabel.textContent = '';
+          userLabel.classList.add('hidden');
+        }
+      }
+    }
+
+    function showAuthGate(show) {
+      const gate = document.getElementById('auth-gate-overlay');
+      if (!gate) return;
+      if (show) {
+        gate.classList.remove('hidden');
+        gate.classList.add('flex');
+      } else {
+        gate.classList.add('hidden');
+        gate.classList.remove('flex');
+      }
+    }
+
+    function getPublicDocRef(docName) {
+      return doc(cloudBridge.db, 'artifacts', cloudBridge.appId, 'public', 'data', 'sri_rehabilitacion', docName);
+    }
+
+    function getMemberDocRef(uid) {
+      return doc(cloudBridge.db, 'artifacts', cloudBridge.appId, 'public', 'data', 'sri_equipo', uid);
+    }
+
+    async function verifyTeamMembership(user) {
+      if (!user || user.isAnonymous) return null;
+      const memberRef = getMemberDocRef(user.uid);
+      const snap = await getDoc(memberRef);
+      if (!snap.exists()) {
+        return null;
+      }
+      const data = snap.data();
+      if (data && data.autorizado === false) {
+        return null;
+      }
+      return {
+        uid: user.uid,
+        email: data?.email || user.email || '',
+        nombre: data?.nombre || '',
+        rol: data?.rol || 'Equipo SRI'
+      };
+    }
+
+    function detachCloudListeners() {
+      if (typeof cloudBridge.unsubPatients === 'function') cloudBridge.unsubPatients();
+      if (typeof cloudBridge.unsubAttendance === 'function') cloudBridge.unsubAttendance();
+      if (typeof cloudBridge.unsubPhysiatrist === 'function') cloudBridge.unsubPhysiatrist();
+      cloudBridge.unsubPatients = null;
+      cloudBridge.unsubAttendance = null;
+      cloudBridge.unsubPhysiatrist = null;
+    }
+
+    function startCloudRealtimeListeners() {
+      if (!cloudBridge.enabled || !cloudBridge.db || !cloudBridge.currentUser) return;
+      if (cloudBridge.currentUser.isAnonymous && !hasRoomPinSession()) return;
+      detachCloudListeners();
+      setCloudStatusBadge('Sincronizando...', 'syncing');
+
+      const patientsRef = getPublicDocRef('patients_state');
+      const attendanceRef = getPublicDocRef('attendance_state');
+      const physiatristRef = getPublicDocRef('physiatrist_state');
+
+      cloudBridge.unsubPatients = onSnapshot(
+        patientsRef,
+        (snap) => {
+          cloudBridge.isApplyingRemote = true;
+          try {
+            if (snap.exists() && Array.isArray(snap.data().items)) {
+              window.applyRemoteState('patients', snap.data().items);
+            } else if (Array.isArray(window.patients) && window.patients.length > 0) {
+              setDoc(patientsRef, { items: window.patients, updatedAt: new Date().toISOString() }, { merge: true });
+            }
+            setCloudStatusBadge('Nube Sincronizada', 'live');
+          } finally {
+            cloudBridge.isApplyingRemote = false;
+          }
+        },
+        (err) => {
+          console.error('Error escuchando pacientes en la nube:', err);
+          setCloudStatusBadge('Error de Nube', 'locked');
+          if (typeof window.showToast === 'function') {
+            window.showToast('No se pudo sincronizar pacientes con la nube.', 'error');
+          }
+        }
+      );
+
+      cloudBridge.unsubAttendance = onSnapshot(
+        attendanceRef,
+        (snap) => {
+          cloudBridge.isApplyingRemote = true;
+          try {
+            if (snap.exists() && snap.data().map && typeof snap.data().map === 'object') {
+              window.applyRemoteState('attendance', snap.data().map);
+            } else if (window.attendanceMap && typeof window.attendanceMap === 'object') {
+              setDoc(attendanceRef, { map: window.attendanceMap, updatedAt: new Date().toISOString() }, { merge: true });
+            }
+            setCloudStatusBadge('Nube Sincronizada', 'live');
+          } finally {
+            cloudBridge.isApplyingRemote = false;
+          }
+        },
+        (err) => {
+          console.error('Error escuchando asistencias en la nube:', err);
+          setCloudStatusBadge('Error de Nube', 'locked');
+        }
+      );
+
+      cloudBridge.unsubPhysiatrist = onSnapshot(
+        physiatristRef,
+        (snap) => {
+          cloudBridge.isApplyingRemote = true;
+          try {
+            if (snap.exists() && snap.data().map && typeof snap.data().map === 'object') {
+              window.applyRemoteState('physiatrist', snap.data().map);
+            } else if (window.physiatristMap && typeof window.physiatristMap === 'object') {
+              setDoc(physiatristRef, { map: window.physiatristMap, updatedAt: new Date().toISOString() }, { merge: true });
+            }
+            setCloudStatusBadge('Nube Sincronizada', 'live');
+          } finally {
+            cloudBridge.isApplyingRemote = false;
+          }
+        },
+        (err) => {
+          console.error('Error escuchando fisiatría en la nube:', err);
+          setCloudStatusBadge('Error de Nube', 'locked');
+        }
+      );
+    }
+
+    async function syncCollectionToCloud(collectionKey, value) {
+      if (!cloudBridge.enabled || !cloudBridge.db || !cloudBridge.currentUser || cloudBridge.isApplyingRemote) {
+        return;
+      }
+      if (cloudBridge.currentUser.isAnonymous && !cloudBridge.teamProfile && !hasRoomPinSession()) {
+        return;
+      }
+
+      try {
+        setCloudStatusBadge('Guardando...', 'syncing');
+        const payload = {
+          updatedAt: new Date().toISOString(),
+          updatedBy: cloudBridge.teamProfile?.email || (hasRoomPinSession() ? 'Equipo Sala (Clave)' : (cloudBridge.currentUser.email || cloudBridge.currentUser.uid))
+        };
+        if (collectionKey === 'patients') {
+          payload.items = value;
+          await setDoc(getPublicDocRef('patients_state'), payload, { merge: true });
+        } else if (collectionKey === 'attendance') {
+          payload.map = value;
+          await setDoc(getPublicDocRef('attendance_state'), payload, { merge: true });
+        } else if (collectionKey === 'physiatrist') {
+          payload.map = value;
+          await setDoc(getPublicDocRef('physiatrist_state'), payload, { merge: true });
+        }
+        setCloudStatusBadge('Nube Sincronizada', 'live');
+      } catch (err) {
+        console.error(`Error guardando ${collectionKey} en nube:`, err);
+        setCloudStatusBadge('Sin conexión nube', 'locked');
+      }
+    }
+
+    window.syncCollectionToCloud = syncCollectionToCloud;
+
+    window.handleTeamAuthSubmit = async function (event) {
+      event.preventDefault();
+      const modeEl = document.getElementById('auth-mode');
+      const emailEl = document.getElementById('auth-email');
+      const passEl = document.getElementById('auth-password');
+      const nombreEl = document.getElementById('auth-nombre');
+      const rolEl = document.getElementById('auth-rol');
+      const errEl = document.getElementById('auth-error-msg');
+      const btnEl = document.getElementById('auth-submit-btn');
+
+      if (!emailEl || !passEl) return;
+      const email = emailEl.value.trim();
+      const password = passEl.value;
+      const mode = modeEl ? modeEl.value : 'login';
+
+      if (errEl) errEl.classList.add('hidden');
+
+      if (!cloudBridge.enabled || !cloudBridge.auth) {
+        if (errEl) {
+          errEl.textContent = 'La conexión en la nube no está configurada en este entorno.';
+          errEl.classList.remove('hidden');
+        }
+        return;
+      }
+
+      try {
+        if (btnEl) {
+          btnEl.disabled = true;
+          btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Verificando...</span>';
+        }
+
+        let cred;
+        if (mode === 'register') {
+          cred = await createUserWithEmailAndPassword(cloudBridge.auth, email, password);
+          const nombre = nombreEl ? nombreEl.value.trim() : '';
+          const rol = rolEl ? rolEl.value : 'Fisioterapeuta';
+          await setDoc(getMemberDocRef(cred.user.uid), {
+            email,
+            nombre,
+            rol,
+            autorizado: true,
+            createdAt: new Date().toISOString()
+          }, { merge: true });
+        } else {
+          cred = await signInWithEmailAndPassword(cloudBridge.auth, email, password);
+        }
+
+        const profile = await verifyTeamMembership(cred.user);
+        if (!profile) {
+          await signOut(cloudBridge.auth);
+          throw new Error('Tu usuario no está habilitado dentro del equipo autorizado del SRI Simón Bolívar.');
+        }
+
+        cloudBridge.currentUser = cred.user;
+        cloudBridge.teamProfile = profile;
+        showAuthGate(false);
+        startCloudRealtimeListeners();
+        if (typeof window.showToast === 'function') {
+          window.showToast(`Bienvenido/a ${profile.nombre || profile.email} (${profile.rol}).`, 'success');
+        }
+      } catch (err) {
+        console.error('Error de autenticación del equipo:', err);
+        const isProviderDisabled = err && (err.code === 'auth/operation-not-allowed' || String(err.message || '').includes('auth/operation-not-allowed'));
+        if (isProviderDisabled) {
+          showAuthFallback(true);
+        }
+        if (errEl) {
+          errEl.textContent = isProviderDisabled
+            ? 'Firebase tiene desactivado el acceso por Correo/Contraseña (auth/operation-not-allowed). Actívalo en Firebase Console > Authentication > Sign-in method o usa la Clave de Sala aquí abajo.'
+            : (err.message || 'Correo o contraseña incorrectos.');
+          errEl.classList.remove('hidden');
+        }
+      } finally {
+        if (btnEl) {
+          btnEl.disabled = false;
+          btnEl.innerHTML = mode === 'register'
+            ? '<i class="fa-solid fa-user-plus"></i><span>Registrar Usuario de Sala</span>'
+            : '<i class="fa-solid fa-right-to-bracket"></i><span>Entrar al Sistema del SRI</span>';
+        }
+      }
+    };
+
+    window.unlockWithRoomPin = async function () {
+      const pinInput = document.getElementById('auth-room-pin');
+      const errEl = document.getElementById('auth-error-msg');
+      const enteredPin = pinInput ? pinInput.value.trim() : '';
+
+      if (enteredPin !== DEFAULT_ROOM_PIN) {
+        if (errEl) {
+          errEl.textContent = 'Clave de sala incorrecta. Verifica con la coordinación o activa Correo/Contraseña en Firebase.';
+          errEl.classList.remove('hidden');
+        }
+        return;
+      }
+
+      try {
+        if (cloudBridge.auth && !cloudBridge.currentUser) {
+          const anonCred = await signInAnonymously(cloudBridge.auth);
+          cloudBridge.currentUser = anonCred.user;
+        }
+        setRoomPinSession(true);
+        cloudBridge.teamProfile = {
+          email: 'equipo.sala@sri',
+          nombre: 'Equipo SRI Simón Bolívar',
+          rol: 'Clave de Sala'
+        };
+        if (errEl) errEl.classList.add('hidden');
+        showAuthGate(false);
+        startCloudRealtimeListeners();
+        if (typeof window.showToast === 'function') {
+          window.showToast('Acceso concedido con Clave de Sala.', 'success');
+        }
+      } catch (err) {
+        console.error('Error al iniciar sesión anónima para sala:', err);
+        if (errEl) {
+          errEl.textContent = 'No se pudo iniciar la sesión de sala en Firebase.';
+          errEl.classList.remove('hidden');
+        }
+      }
+    };
+
+    window.logoutTeamUser = async function () {
+      try {
+        detachCloudListeners();
+        setRoomPinSession(false);
+        cloudBridge.teamProfile = null;
+        if (cloudBridge.auth && cloudBridge.currentUser && !cloudBridge.currentUser.isAnonymous) {
+          await signOut(cloudBridge.auth);
+        }
+        if (cloudBridge.enabled && cloudBridge.auth) {
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
+          } else {
+            await signInAnonymously(cloudBridge.auth);
+          }
+        }
+        showAuthGate(true);
+        setCloudStatusBadge('Acceso Bloqueado', 'locked');
+        if (typeof window.showToast === 'function') {
+          window.showToast('Sesión cerrada. Ingresa con tu usuario y clave.', 'info');
+        }
+      } catch (err) {
+        console.error('Error al cerrar sesión:', err);
+      }
+    };
+
+    window.openAuthGateModal = function () {
+      showAuthGate(true);
+    };
+
+    (async function initCloudAndAuth() {
+      if (!cloudBridge.enabled) {
+        setCloudStatusBadge('Modo Local', 'local');
+        return;
+      }
+
+      try {
+        cloudBridge.app = initializeApp(firebaseConfig);
+        cloudBridge.auth = getAuth(cloudBridge.app);
+        cloudBridge.db = getFirestore(cloudBridge.app);
+
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(cloudBridge.auth);
+        }
+
+        onAuthStateChanged(cloudBridge.auth, async (user) => {
+          cloudBridge.currentUser = user;
+          if (!user || user.isAnonymous) {
+            if (user && hasRoomPinSession()) {
+              cloudBridge.teamProfile = {
+                email: 'equipo.sala@sri',
+                nombre: 'Equipo SRI Simón Bolívar',
+                rol: 'Clave de Sala'
+              };
+              showAuthGate(false);
+              startCloudRealtimeListeners();
+              return;
+            }
+            cloudBridge.teamProfile = null;
+            detachCloudListeners();
+            setCloudStatusBadge('Requiere Usuario', 'locked');
+            showAuthGate(true);
+            return;
+          }
+
+          const profile = await verifyTeamMembership(user);
+          if (profile) {
+            cloudBridge.teamProfile = profile;
+            showAuthGate(false);
+            startCloudRealtimeListeners();
+          } else {
+            cloudBridge.teamProfile = null;
+            detachCloudListeners();
+            setCloudStatusBadge('Usuario no autorizado', 'locked');
+            showAuthGate(true);
+          }
+        });
+      } catch (err) {
+        console.error('Error inicializando autenticación y nube:', err);
+        setCloudStatusBadge('Error de conexión', 'locked');
+        showAuthGate(true);
+      }
+    })();
+  </script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+          },
+          colors: {
+            clinical: {
+              50: '#f0f7ff',
+              100: '#e0effe',
+              200: '#bae0fd',
+              300: '#7cc8fb',
+              400: '#36aaf5',
+              500: '#0c8ee6',
+              600: '#0070c4',
+              700: '#01599f',
+              800: '#064c83',
+              900: '#0b406d',
+            }
+          }
+        }
+      }
+    };
+  </script>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans antialiased min-h-screen flex flex-col">
+
+  <!-- Barra de Navegación Superior -->
+  <header class="bg-gradient-to-r from-clinical-800 to-clinical-700 text-white shadow-md sticky top-0 z-30">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div class="bg-white/15 p-2.5 rounded-xl backdrop-blur-sm border border-white/20">
+          <i class="fa-solid fa-heart-pulse text-2xl text-emerald-300"></i>
+        </div>
+        <div>
+          <h1 class="text-lg sm:text-xl font-bold tracking-tight leading-tight">SRI Simón Bolívar</h1>
+          <p class="text-xs sm:text-sm text-clinical-100">Control Digital de Pacientes, Asistencia y Estadística</p>
+        </div>
+      </div>
+
+      <!-- Estado de Nube, Usuario y Pestañas Principales -->
+      <div class="flex flex-col lg:flex-row lg:items-center gap-2.5 w-full sm:w-auto">
+        <div class="flex flex-wrap items-center justify-between sm:justify-end gap-2">
+          <button type="button" onclick="openAuthGateModal()" id="cloud-sync-badge" class="text-[11px] font-bold px-2.5 py-1 rounded-full border bg-white/15 text-clinical-100 border-white/20 flex items-center gap-1.5 transition" title="Estado de sincronización y cuenta del equipo">
+            <i class="fa-solid fa-cloud"></i>
+            <span>Conectando...</span>
+          </button>
+          <span id="cloud-user-label" class="hidden text-[11px] font-semibold bg-clinical-900/60 border border-white/15 px-2.5 py-1 rounded-full text-emerald-200 truncate max-w-[200px]"></span>
+          <button type="button" onclick="logoutTeamUser()" class="text-[11px] font-bold px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 text-white transition flex items-center gap-1" title="Cambiar usuario o cerrar sesión">
+            <i class="fa-solid fa-right-from-bracket"></i>
+            <span>Salir</span>
+          </button>
+        </div>
+
+        <!-- Pestañas Principales -->
+        <nav class="flex bg-clinical-900/50 p-1 rounded-xl border border-white/10 self-start sm:self-auto w-full sm:w-auto">
+          <button type="button" onclick="switchTab('asistencia')" id="nav-tab-asistencia" class="flex-1 sm:flex-initial px-3.5 py-2 rounded-lg text-xs sm:text-sm font-bold bg-white text-clinical-800 shadow-2xs transition flex items-center justify-center gap-1.5">
+            <i class="fa-solid fa-clipboard-check"></i>
+            <span>Asistencia</span>
+          </button>
+          <button type="button" onclick="switchTab('pacientes')" id="nav-tab-pacientes" class="flex-1 sm:flex-initial px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold text-clinical-100 hover:text-white transition flex items-center justify-center gap-1.5">
+            <i class="fa-solid fa-id-card"></i>
+            <span>Tarjetas</span>
+            <span id="badge-total-pacientes" class="text-[11px] font-extrabold px-1.5 py-0.2 rounded-full bg-clinical-600 text-white">0</span>
+          </button>
+          <button type="button" onclick="switchTab('historial')" id="nav-tab-historial" class="flex-1 sm:flex-initial px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold text-clinical-100 hover:text-white transition flex items-center justify-center gap-1.5">
+            <i class="fa-solid fa-chart-line"></i>
+            <span>Historial</span>
+          </button>
+        </nav>
+      </div>
+    </div>
+  </header>
+
+  <!-- Notificación Toast Flotante -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+  <!-- Pantalla de Acceso con Usuario y Clave Exclusiva del Equipo del SRI -->
+  <div id="auth-gate-overlay" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-40 hidden items-center justify-center p-4 overflow-y-auto">
+    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full border border-slate-200 overflow-hidden my-auto">
+      <div class="bg-gradient-to-r from-clinical-800 to-clinical-700 text-white px-6 py-5">
+        <div class="flex items-center gap-3">
+          <div class="w-11 h-11 rounded-xl bg-white/15 border border-white/25 flex items-center justify-center shrink-0">
+            <i class="fa-solid fa-shield-halved text-xl text-emerald-300"></i>
+          </div>
+          <div>
+            <h2 class="text-lg font-extrabold tracking-tight">Acceso del Equipo · SRI Simón Bolívar</h2>
+            <p class="text-xs text-clinical-100">Secretaria, fisioterapeutas, jefatura y personal autorizado</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="p-6 space-y-4">
+        <div class="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
+          <button type="button" id="auth-tab-login" onclick="toggleAuthMode('login')" class="flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition">
+            Iniciar Sesión
+          </button>
+          <button type="button" id="auth-tab-register" onclick="toggleAuthMode('register')" class="flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition">
+            Crear Usuario de Sala
+          </button>
+        </div>
+
+        <form id="auth-team-form" onsubmit="handleTeamAuthSubmit(event)" class="space-y-3.5">
+          <input type="hidden" id="auth-mode" value="login" />
+
+          <div id="auth-register-fields" class="hidden space-y-3">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre del Trabajador</label>
+              <input type="text" id="auth-nombre" placeholder="Ej. Lic. Ana Pérez" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Cargo / Rol en la Sala</label>
+              <select id="auth-rol" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-clinical-500">
+                <option value="Secretaria">Secretaria</option>
+                <option value="Fisioterapeuta">Fisioterapeuta</option>
+                <option value="Jefatura">Jefa / Coordinación</option>
+                <option value="Especialista">Podología / Foniatría / Ocupacional</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Usuario (Correo del Equipo) *</label>
+            <input type="email" id="auth-email" required placeholder="Ej. secretaria.sri@ejemplo.com" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Contraseña / Clave *</label>
+            <input type="password" id="auth-password" required minlength="6" placeholder="Mínimo 6 caracteres" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+
+          <div id="auth-error-msg" class="hidden text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3.5 py-2.5"></div>
+
+          <button type="submit" id="auth-submit-btn" class="w-full py-3 px-4 rounded-xl bg-clinical-600 hover:bg-clinical-700 text-white text-sm font-bold shadow-sm transition flex items-center justify-center gap-2">
+            <i class="fa-solid fa-right-to-bracket"></i>
+            <span>Entrar al Sistema del SRI</span>
+          </button>
+        </form>
+
+        <!-- Respaldo cuando Correo/Contraseña no está habilitado aún en Firebase -->
+        <div id="auth-fallback-box" class="hidden pt-3 border-t border-slate-200 space-y-2.5">
+          <p class="text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+            Acceso rápido por Clave de Sala mientras activas Correo/Contraseña en Firebase:
+          </p>
+          <div class="flex gap-2">
+            <input type="password" id="auth-room-pin" placeholder="Clave de sala (SRI2026)" class="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+            <button type="button" onclick="unlockWithRoomPin()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold transition">
+              Entrar con Clave
+            </button>
+          </div>
+        </div>
+
+        <p class="text-[11px] text-slate-500 leading-relaxed bg-slate-50 border border-slate-200/80 rounded-xl p-3">
+          Los pacientes, asistencias y consultas/reconsultas con fisiatra se sincronizan en tiempo real en la nube para los usuarios autorizados de la sala.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Contenedor Principal -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+
+    <!-- ===================================================================== -->
+    <!-- VISTA 1: CONTROL DE ASISTENCIA DIARIA Y ESTADÍSTICA AUTOMÁTICA        -->
+    <!-- ===================================================================== -->
+    <section id="view-asistencia" class="space-y-6">
+
+      <!-- Selector de Fecha Prominente -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5">
+        <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div>
+            <span class="text-xs font-bold uppercase tracking-wider text-clinical-600">Jornada de Atención</span>
+            <h2 id="fecha-legible-titulo" class="text-xl sm:text-2xl font-extrabold text-slate-900 mt-0.5 capitalize">
+              Cargando fecha...
+            </h2>
+          </div>
+
+          <!-- Botones Rápidos de Fecha + Calendario -->
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="setOffsetDate(-1)" id="btn-date-ayer" class="px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 transition">
+              Ayer
+            </button>
+            <button onclick="setOffsetDate(0)" id="btn-date-hoy" class="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold border border-clinical-600 bg-clinical-600 text-white shadow-sm transition">
+              Hoy
+            </button>
+            <button onclick="setOffsetDate(1)" id="btn-date-manana" class="px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 transition">
+              Mañana
+            </button>
+            <button onclick="setOffsetDate(2)" id="btn-date-pasado" class="px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 transition">
+              Pasado Mañana
+            </button>
+            <div class="relative flex items-center">
+              <input type="date" id="date-picker" onchange="onDatePickerChange(this.value)" class="px-3 py-2 rounded-xl text-xs sm:text-sm font-medium border border-slate-300 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tarjetas de Estadística Automática en Tiempo Real -->
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <!-- Total Pacientes del Día -->
+        <div class="bg-gradient-to-br from-emerald-600 to-emerald-700 text-white rounded-2xl p-5 shadow-sm flex flex-col justify-between">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold uppercase tracking-wider text-emerald-100">Pacientes Atendidos</span>
+            <div class="bg-white/20 p-2 rounded-xl">
+              <i class="fa-solid fa-user-check text-lg"></i>
+            </div>
+          </div>
+          <div class="my-2">
+            <span id="stat-total-pacientes" class="text-4xl font-extrabold tracking-tight">0</span>
+            <span class="text-sm text-emerald-100 ml-1">pacientes hoy</span>
+          </div>
+          <div class="text-xs text-emerald-100 border-t border-white/15 pt-2 flex justify-between">
+            <span>Total tratamientos aplicados:</span>
+            <strong id="stat-total-sesiones" class="text-white text-sm">0</strong>
+          </div>
+        </div>
+
+        <!-- Desglose por Modalidad / Tratamiento -->
+        <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 md:col-span-1 xl:col-span-2">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Tratamientos Aplicados en el Día</span>
+            <i class="fa-solid fa-notes-medical text-clinical-600"></i>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div class="bg-blue-50/80 border border-blue-100 rounded-xl p-3 text-center">
+              <div class="text-xs font-semibold text-blue-800 mb-1">Electroterapia</div>
+              <div id="stat-mod-electro" class="text-2xl font-extrabold text-blue-700">0</div>
+            </div>
+            <div class="bg-indigo-50/80 border border-indigo-100 rounded-xl p-3 text-center">
+              <div class="text-xs font-semibold text-indigo-800 mb-1">Magnetoterapia</div>
+              <div id="stat-mod-magneto" class="text-2xl font-extrabold text-indigo-700">0</div>
+            </div>
+            <div class="bg-amber-50/80 border border-amber-100 rounded-xl p-3 text-center">
+              <div class="text-xs font-semibold text-amber-800 mb-1">Termoterapia</div>
+              <div id="stat-mod-termo" class="text-2xl font-extrabold text-amber-700">0</div>
+            </div>
+            <div class="bg-teal-50/80 border border-teal-100 rounded-xl p-3 text-center">
+              <div class="text-xs font-semibold text-teal-800 mb-1">Gimnasio</div>
+              <div id="stat-mod-gimnasio" class="text-2xl font-extrabold text-teal-700">0</div>
+            </div>
+            <div class="bg-purple-50/80 border border-purple-100 rounded-xl p-3 text-center">
+              <div class="text-xs font-semibold text-purple-800 mb-1">Terapia Ocupacional</div>
+              <div id="stat-mod-ocupacional" class="text-2xl font-extrabold text-purple-700">0</div>
+            </div>
+            <div class="bg-cyan-50/80 border border-cyan-100 rounded-xl p-3 text-center">
+              <div class="text-xs font-semibold text-cyan-800 mb-1">MNT</div>
+              <div id="stat-mod-mnt" class="text-2xl font-extrabold text-cyan-700">0</div>
+            </div>
+            <div class="bg-rose-50/80 border border-rose-100 rounded-xl p-3 text-center">
+              <div class="text-xs font-semibold text-rose-800 mb-1">Podología / Foniatría</div>
+              <div id="stat-mod-podo-fonia" class="text-xl font-extrabold text-rose-700">0 / 0</div>
+            </div>
+            <div class="bg-emerald-50/80 border border-emerald-100 rounded-xl p-3 text-center">
+              <div class="text-xs font-semibold text-emerald-800 mb-1">Fisiatra (Cons/Recons)</div>
+              <div id="stat-mod-fisiatra" class="text-xl font-extrabold text-emerald-700">0 / 0</div>
+            </div>
+          </div>
+
+          <!-- Desglose Separado por Áreas: Fisioterapia, Terapia Ocupacional y Podología / Fisiatría / Foniatría -->
+          <div class="mt-4 pt-3.5 border-t border-slate-200 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div class="bg-sky-50/70 border border-sky-200/80 rounded-xl p-3">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-[11px] font-extrabold uppercase tracking-wider text-sky-900">Fisioterapia</span>
+                <span class="text-[10px] font-semibold text-sky-700">Electro / Magneto / Termo / Gym</span>
+              </div>
+              <div id="stat-area-fisioterapia" class="text-lg font-extrabold text-sky-950">0 pac. · 0 tr.</div>
+              <div id="stat-area-fisioterapia-detalle" class="text-[11px] text-sky-800 mt-0.5">Electro: 0 · Magneto: 0 · Termo: 0 · Gym: 0</div>
+            </div>
+
+            <div class="bg-purple-50/70 border border-purple-200/80 rounded-xl p-3">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-[11px] font-extrabold uppercase tracking-wider text-purple-900">Terapia Ocupacional</span>
+                <span class="text-[10px] font-semibold text-purple-700">Área Independiente</span>
+              </div>
+              <div id="stat-area-ocupacional" class="text-lg font-extrabold text-purple-950">0 pacientes</div>
+              <div class="text-[11px] text-purple-800 mt-0.5">Atenciones registradas en el día</div>
+            </div>
+
+            <div class="bg-rose-50/70 border border-rose-200/80 rounded-xl p-3">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-[11px] font-extrabold uppercase tracking-wider text-rose-900">Podología, Fisiatría y Foniatría</span>
+                <span class="text-[10px] font-semibold text-rose-700">Especialidades</span>
+              </div>
+              <div id="stat-area-especialidades" class="text-lg font-extrabold text-rose-950">0 atenciones</div>
+              <div id="stat-area-especialidades-detalle" class="text-[11px] text-rose-800 mt-0.5">Podo: 0 · Fisiatría: 0 · Fonia: 0</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cuadro de Rangos de Edad (7 Grupos) Desglosado por Masculino y Femenino -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3.5">
+          <div>
+            <h3 class="text-sm font-extrabold uppercase tracking-wider text-slate-700 flex items-center gap-2">
+              <i class="fa-solid fa-cake-candles text-clinical-600"></i>
+              <span>Rangos de Edad por Sexo, Gimnasio y Depto. Electroterapia</span>
+            </h3>
+            <p class="text-xs text-slate-500 mt-0.5">Desglose por rango etario: Masculino (M), Femenino (F), tratamientos de Gimnasio (×6.5) y Depto. Electroterapia (Electro + Magneto).</p>
+          </div>
+          <div class="flex items-center gap-3 text-xs font-bold">
+            <span class="px-2.5 py-1 rounded-lg bg-sky-100 text-sky-900">Masculino (M): <span id="stat-masc">0</span></span>
+            <span class="px-2.5 py-1 rounded-lg bg-pink-100 text-pink-900">Femenino (F): <span id="stat-fem">0</span></span>
+          </div>
+        </div>
+        <div id="stat-age-brackets-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2.5 text-xs">
+          <!-- Renderizado dinámico por JS -->
+        </div>
+      </div>
+
+      <!-- Barra de Herramientas: Buscador, Nuevo Paciente Rápido y Exportación -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <!-- Buscador -->
+        <div class="relative flex-1">
+          <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"></i>
+          <input type="text" id="search-asistencia" oninput="renderAsistenciaList()" placeholder="Buscar paciente por nombre, apellido o cédula..." class="w-full pl-10 pr-10 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          <button type="button" id="btn-clear-search-asistencia" onclick="clearAsistenciaSearch()" class="hidden absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-1 rounded-lg transition" title="Limpiar búsqueda">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+
+        <!-- Botones de Acción -->
+        <div class="flex flex-wrap items-center gap-2">
+          <button onclick="openPatientModal()" class="px-4 py-2.5 rounded-xl bg-clinical-600 hover:bg-clinical-700 text-white text-xs sm:text-sm font-semibold shadow-sm transition flex items-center gap-2">
+            <i class="fa-solid fa-user-plus"></i>
+            <span>Nuevo Paciente</span>
+          </button>
+          <button onclick="copyWhatsAppReport()" class="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold shadow-sm transition flex items-center gap-2">
+            <i class="fa-brands fa-whatsapp text-base"></i>
+            <span>Copiar Reporte WhatsApp</span>
+          </button>
+          <button onclick="exportDayCSV()" class="px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-xs sm:text-sm font-semibold transition flex items-center gap-2">
+            <i class="fa-solid fa-file-excel text-emerald-700"></i>
+            <span>Excel (CSV)</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Lista de Pacientes para Marcar Asistencia con 1 Clic -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div class="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <h3 class="font-bold text-slate-800 text-sm sm:text-base flex items-center gap-2">
+              <i class="fa-solid fa-list-check text-clinical-600"></i>
+              <span>Listado de Pacientes Activos (Toca para marcar asistencia)</span>
+            </h3>
+            <span id="asistencia-count-badge" class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-clinical-100 text-clinical-800">
+              0 mostrados
+            </span>
+          </div>
+          <div class="flex items-center gap-2 text-xs">
+            <label class="inline-flex items-center gap-1.5 cursor-pointer select-none text-slate-600 font-medium">
+              <input type="checkbox" id="filter-solo-asistieron" onchange="renderAsistenciaList()" class="rounded text-clinical-600 focus:ring-clinical-500" />
+              <span>Mostrar solo los que asistieron hoy</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="asistencia-list-container" class="divide-y divide-slate-100">
+          <!-- Renderizado dinámico por JS -->
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ===================================================================== -->
+    <!-- VISTA 2: BASE DE DATOS DE TARJETAS / PACIENTES                        -->
+    <!-- ===================================================================== -->
+    <section id="view-pacientes" class="hidden space-y-6">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h2 class="text-xl font-extrabold text-slate-900">Tarjetas Digitales de Pacientes</h2>
+          <p class="text-xs sm:text-sm text-slate-500 mt-0.5">Registra, edita o respalda la información clínica de cada paciente.</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <button onclick="openPatientModal()" class="px-4 py-2.5 rounded-xl bg-clinical-600 hover:bg-clinical-700 text-white text-xs sm:text-sm font-semibold shadow-sm transition flex items-center gap-2">
+            <i class="fa-solid fa-plus"></i>
+            <span>Registrar Paciente</span>
+          </button>
+          <button onclick="exportBackupJSON()" class="px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-xs sm:text-sm font-semibold transition flex items-center gap-2" title="Descargar respaldo completo">
+            <i class="fa-solid fa-download"></i>
+            <span>Respaldo JSON</span>
+          </button>
+          <label class="px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-xs sm:text-sm font-semibold transition flex items-center gap-2 cursor-pointer" title="Restaurar respaldo desde archivo">
+            <i class="fa-solid fa-upload"></i>
+            <span>Importar JSON</span>
+            <input type="file" accept=".json" onchange="importBackupJSON(event)" class="hidden" />
+          </label>
+          <button onclick="confirmClearDemoData()" class="px-3.5 py-2.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs sm:text-sm font-semibold transition flex items-center gap-2">
+            <i class="fa-solid fa-trash-can"></i>
+            <span>Limpiar Todo</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Buscador en Tarjetas -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+        <div class="relative">
+          <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"></i>
+          <input type="text" id="search-pacientes" oninput="renderPatientsCards()" placeholder="Buscar tarjeta por nombre, apellido, cédula o diagnóstico..." class="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+        </div>
+      </div>
+
+      <!-- Cuadrícula de Tarjetas Digitales -->
+      <div id="pacientes-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <!-- Renderizado dinámico por JS -->
+      </div>
+    </section>
+
+    <!-- ===================================================================== -->
+    <!-- VISTA 3: RESUMEN MULTI-DÍA / HISTORIAL ACUMULADO                      -->
+    <!-- ===================================================================== -->
+    <section id="view-historial" class="hidden space-y-6">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h2 class="text-xl font-extrabold text-slate-900">Resumen Estadístico Multi-Día</h2>
+          <p class="text-xs sm:text-sm text-slate-500 mt-0.5">Consolidado automático de todos los días con asistencias registradas (Hoy, Mañana, Pasado Mañana y anteriores).</p>
+        </div>
+        <button onclick="exportAllHistoryCSV()" class="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold shadow-sm transition flex items-center gap-2 self-start sm:self-auto">
+          <i class="fa-solid fa-file-csv text-base"></i>
+          <span>Descargar Consolidado Excel</span>
+        </button>
+      </div>
+
+      <!-- Tabla Consolidada por Fecha -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left border-collapse">
+            <thead>
+              <tr class="bg-slate-50 border-b border-slate-200 text-xs font-bold uppercase tracking-wider text-slate-600">
+                <th class="py-3.5 px-4">Fecha</th>
+                <th class="py-3.5 px-4 text-center">Pacientes</th>
+                <th class="py-3.5 px-4 text-center">Electro</th>
+                <th class="py-3.5 px-4 text-center">Magneto</th>
+                <th class="py-3.5 px-4 text-center">Termo</th>
+                <th class="py-3.5 px-4 text-center">Gimnasio</th>
+                <th class="py-3.5 px-4 text-center">Ter. Ocup.</th>
+                <th class="py-3.5 px-4 text-center">MNT</th>
+                <th class="py-3.5 px-4 text-center">Podo / Fonia</th>
+                <th class="py-3.5 px-4 text-center">Fisiatra (C/R)</th>
+                <th class="py-3.5 px-4 text-center">Fisioterapia</th>
+                <th class="py-3.5 px-4 text-center">Edades M / F</th>
+                <th class="py-3.5 px-4 text-right">Acción</th>
+              </tr>
+            </thead>
+            <tbody id="historial-table-body" class="divide-y divide-slate-100 text-sm">
+              <!-- Renderizado dinámico por JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: REGISTRAR / EDITAR PACIENTE (TARJETA DIGITAL)                  -->
+  <!-- ===================================================================== -->
+  <div id="modal-paciente" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-40 hidden items-start sm:items-center justify-center p-2 sm:p-4 overflow-y-auto">
+    <div class="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[92vh] flex flex-col overflow-hidden my-auto border border-slate-200 animate-fadeIn">
+      <div class="bg-clinical-800 text-white px-5 sm:px-6 py-4 flex items-center justify-between shrink-0">
+        <h3 id="modal-paciente-title" class="text-base sm:text-lg font-bold flex items-center gap-2">
+          <i class="fa-solid fa-id-card"></i>
+          <span>Nueva Tarjeta de Paciente</span>
+        </h3>
+        <button onclick="closePatientModal()" class="text-white/80 hover:text-white p-1.5 rounded-lg transition">
+          <i class="fa-solid fa-xmark text-xl"></i>
+        </button>
+      </div>
+
+      <form id="form-paciente" onsubmit="savePatient(event)" class="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
+        <input type="hidden" id="paciente-id" />
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">N° Control / Asistencia (Tarjeta)</label>
+            <input type="text" id="paciente-numero-tarjeta" placeholder="Ej. 0145" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Cédula *</label>
+            <input type="text" id="paciente-cedula" required placeholder="Ej. 14.520.310" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre *</label>
+            <input type="text" id="paciente-nombre" required placeholder="Ej. María Elena" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Apellido *</label>
+            <input type="text" id="paciente-apellido" required placeholder="Ej. González Pérez" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Edad (años) *</label>
+            <input type="number" id="paciente-edad" required min="0" max="120" oninput="updateModalAgeBadge()" placeholder="Ej. 68" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Sexo *</label>
+            <select id="paciente-sexo" required class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-clinical-500">
+              <option value="F">Femenino (F)</option>
+              <option value="M">Masculino (M)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Etiqueta Automática de Grupo Etario -->
+        <div class="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 flex items-center justify-between">
+          <span class="text-xs font-semibold text-slate-600">Clasificación automática por edad:</span>
+          <span id="modal-age-badge" class="text-xs font-bold px-2.5 py-1 rounded-full bg-slate-200 text-slate-700">
+            Ingresa la edad
+          </span>
+        </div>
+
+        <!-- Modalidades / Tratamientos -->
+        <div>
+          <label class="block text-xs font-bold text-slate-700 uppercase mb-2">Modalidades / Tratamientos Indicados *</label>
+          <p class="text-[11px] font-bold uppercase tracking-wider text-clinical-700 mb-1.5">Área de Rehabilitación (Indica cantidad por sesión donde aplique)</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mb-3">
+            <div class="flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 hover:bg-blue-50/50 transition">
+              <label class="flex items-center gap-2.5 cursor-pointer flex-1">
+                <input type="checkbox" name="modalidad" value="Electroterapia" onchange="toggleModalidadQtyInput('Electroterapia', this.checked)" class="w-4 h-4 rounded text-clinical-600 focus:ring-clinical-500" />
+                <span class="text-sm font-medium text-slate-800">Electroterapia</span>
+              </label>
+              <div class="flex items-center gap-1" title="Cantidad de corrientes por sesión">
+                <span class="text-[10px] font-bold text-slate-400">Cant:</span>
+                <input type="number" id="qty-Electroterapia" min="1" max="10" value="1" disabled class="w-12 px-1.5 py-1 text-xs font-bold text-center rounded-lg border border-slate-300 bg-slate-100 text-slate-700 disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+              </div>
+            </div>
+            <div class="flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 hover:bg-indigo-50/50 transition">
+              <label class="flex items-center gap-2.5 cursor-pointer flex-1">
+                <input type="checkbox" name="modalidad" value="Magnetoterapia" onchange="toggleModalidadQtyInput('Magnetoterapia', this.checked)" class="w-4 h-4 rounded text-clinical-600 focus:ring-clinical-500" />
+                <span class="text-sm font-medium text-slate-800">Magnetoterapia</span>
+              </label>
+              <div class="flex items-center gap-1" title="Cantidad de magnetos por sesión">
+                <span class="text-[10px] font-bold text-slate-400">Cant:</span>
+                <input type="number" id="qty-Magnetoterapia" min="1" max="10" value="1" disabled class="w-12 px-1.5 py-1 text-xs font-bold text-center rounded-lg border border-slate-300 bg-slate-100 text-slate-700 disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+              </div>
+            </div>
+            <div class="flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 hover:bg-amber-50/50 transition">
+              <label class="flex items-center gap-2.5 cursor-pointer flex-1">
+                <input type="checkbox" name="modalidad" value="Termoterapia" onchange="toggleModalidadQtyInput('Termoterapia', this.checked)" class="w-4 h-4 rounded text-clinical-600 focus:ring-clinical-500" />
+                <span class="text-sm font-medium text-slate-800">Termoterapia</span>
+              </label>
+              <div class="flex items-center gap-1" title="Cantidad de aplicaciones de termoterapia por sesión">
+                <span class="text-[10px] font-bold text-slate-400">Cant:</span>
+                <input type="number" id="qty-Termoterapia" min="1" max="10" value="1" disabled class="w-12 px-1.5 py-1 text-xs font-bold text-center rounded-lg border border-slate-300 bg-slate-100 text-slate-700 disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+              </div>
+            </div>
+            <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:bg-teal-50/50 cursor-pointer transition">
+              <input type="checkbox" name="modalidad" value="Gimnasio" class="w-4 h-4 rounded text-clinical-600 focus:ring-clinical-500" />
+              <span class="text-sm font-medium text-slate-800">Gimnasio Rehabilitación</span>
+            </label>
+            <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:bg-purple-50/50 cursor-pointer transition">
+              <input type="checkbox" name="modalidad" value="Terapia Ocupacional" class="w-4 h-4 rounded text-clinical-600 focus:ring-clinical-500" />
+              <span class="text-sm font-medium text-slate-800">Terapia Ocupacional</span>
+            </label>
+            <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:bg-cyan-50/50 cursor-pointer transition">
+              <input type="checkbox" name="modalidad" value="MNT" class="w-4 h-4 rounded text-clinical-600 focus:ring-clinical-500" />
+              <span class="text-sm font-medium text-slate-800">MNT</span>
+            </label>
+          </div>
+
+          <p class="text-[11px] font-bold uppercase tracking-wider text-emerald-700 mb-1.5">Otras Especialidades y Consulta Médica</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:bg-rose-50/50 cursor-pointer transition">
+              <input type="checkbox" name="modalidad" value="Podología" class="w-4 h-4 rounded text-clinical-600 focus:ring-clinical-500" />
+              <span class="text-sm font-medium text-slate-800">Podología</span>
+            </label>
+            <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:bg-rose-50/50 cursor-pointer transition">
+              <input type="checkbox" name="modalidad" value="Foniatría" class="w-4 h-4 rounded text-clinical-600 focus:ring-clinical-500" />
+              <span class="text-sm font-medium text-slate-800">Foniatría</span>
+            </label>
+          </div>
+          <p class="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2 mt-2.5">
+            <strong>Consulta / Reconsulta con Fisiatra:</strong> se marca directamente en la lista de asistencia del día (especialmente los <strong>martes y jueves</strong>) para cada paciente de rehabilitación sin alterar su tarjeta fija.
+          </p>
+        </div>
+
+        <!-- Sesiones Indicadas y Diagnóstico -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Sesiones Indicadas</label>
+            <input type="number" id="paciente-sesiones-meta" min="1" max="100" value="10" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+          <div class="sm:col-span-2">
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Diagnóstico / Nota Breve (Opcional)</label>
+            <input type="text" id="paciente-diagnostico" placeholder="Ej. Lumbalgia mecánica, Cervicalgia..." class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+          </div>
+        </div>
+
+        <div class="pt-3 border-t border-slate-200 flex items-center justify-end gap-3">
+          <button type="button" onclick="closePatientModal()" class="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-sm font-semibold hover:bg-slate-50 transition">
+            Cancelar
+          </button>
+          <button type="submit" class="px-5 py-2.5 rounded-xl bg-clinical-600 hover:bg-clinical-700 text-white text-sm font-bold shadow-sm transition flex items-center gap-2">
+            <i class="fa-solid fa-floppy-disk"></i>
+            <span>Guardar Tarjeta</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- MODAL DE CONFIRMACIÓN PERSONALIZADO (SIN ALERT/CONFIRM NATIVOS)       -->
+  <!-- ===================================================================== -->
+  <div id="modal-confirm" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 hidden items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 border border-slate-200">
+      <div class="flex items-center gap-3 text-rose-600 mb-3">
+        <div class="bg-rose-100 p-2.5 rounded-xl">
+          <i class="fa-solid fa-triangle-exclamation text-xl"></i>
+        </div>
+        <h3 id="confirm-title" class="text-lg font-bold text-slate-900">Confirmar acción</h3>
+      </div>
+      <p id="confirm-message" class="text-sm text-slate-600 mb-6">¿Estás seguro de realizar esta acción?</p>
+      <div class="flex justify-end gap-3">
+        <button onclick="closeConfirmModal()" class="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-sm font-semibold hover:bg-slate-50 transition">
+          Cancelar
+        </button>
+        <button id="confirm-btn-ok" class="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-bold shadow-sm transition">
+          Sí, continuar
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- LÓGICA DE LA APLICACIÓN (JAVASCRIPT)                                  -->
+  <!-- ===================================================================== -->
+  <script>
+    const STORAGE_KEYS = {
+      PATIENTS: 'sri_sb_patients_v1',
+      ATTENDANCE: 'sri_sb_attendance_v1',
+      PHYSIATRIST: 'sri_sb_physiatrist_v1'
+    };
+
+    const AGE_GROUPS = [
+      { id: '0_1', label: '0 a 1 año', min: 0, max: 1 },
+      { id: '1_4', label: '1 a 4 años', min: 1, max: 4 },
+      { id: '5_12', label: '5 a 12 años', min: 5, max: 12 },
+      { id: '13_17', label: '13 a 17 años', min: 13, max: 17 },
+      { id: '18_24', label: '18 a 24 años', min: 18, max: 24 },
+      { id: '25_64', label: '25 a 64 años', min: 25, max: 64 },
+      { id: '65_plus', label: '65 y más años', min: 65, max: 999 }
+    ];
+
+    function getAgeGroup(age) {
+      const n = Number(age);
+      if (isNaN(n) || n < 0) return AGE_GROUPS[0];
+      if (n <= 1) return AGE_GROUPS[0];
+      if (n <= 4) return AGE_GROUPS[1];
+      if (n <= 12) return AGE_GROUPS[2];
+      if (n <= 17) return AGE_GROUPS[3];
+      if (n <= 24) return AGE_GROUPS[4];
+      if (n <= 64) return AGE_GROUPS[5];
+      return AGE_GROUPS[6];
+    }
+
+    function formatDecimal(val) {
+      if (typeof val !== 'number' || isNaN(val)) return '0';
+      return Number.isInteger(val) ? String(val) : val.toFixed(1).replace('.', ',');
+    }
+
+    let patients = [];
+    let attendanceMap = {};
+    let physiatristMap = {};
+    let selectedDateStr = getTodayISO();
+
+    function toggleAuthMode(mode) {
+      const modeInput = document.getElementById('auth-mode');
+      const regFields = document.getElementById('auth-register-fields');
+      const loginTab = document.getElementById('auth-tab-login');
+      const regTab = document.getElementById('auth-tab-register');
+      const submitBtn = document.getElementById('auth-submit-btn');
+
+      if (modeInput) modeInput.value = mode;
+      if (regFields) regFields.classList.toggle('hidden', mode !== 'register');
+
+      if (loginTab && regTab) {
+        if (mode === 'register') {
+          regTab.className = 'flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition';
+          loginTab.className = 'flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition';
+        } else {
+          loginTab.className = 'flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition';
+          regTab.className = 'flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition';
+        }
+      }
+
+      if (submitBtn) {
+        submitBtn.innerHTML = mode === 'register'
+          ? '<i class="fa-solid fa-user-plus"></i><span>Registrar Usuario de Sala</span>'
+          : '<i class="fa-solid fa-right-to-bracket"></i><span>Entrar al Sistema del SRI</span>';
+      }
+    }
+    window.toggleAuthMode = toggleAuthMode;
+
+    function isPhysiatristDay(isoStr) {
+      if (!isoStr) return false;
+      const [y, m, d] = isoStr.split('-').map(Number);
+      const dayOfWeek = new Date(y, m - 1, d).getDay();
+      return dayOfWeek === 2 || dayOfWeek === 4;
+    }
+
+    function getPhysiatristVisitType(isoStr, patientId) {
+      const dayMap = physiatristMap[isoStr];
+      if (!dayMap || typeof dayMap !== 'object') return null;
+      const val = dayMap[patientId];
+      return val === 'consulta' || val === 'reconsulta' ? val : null;
+    }
+
+    function setPhysiatristVisit(patientId, visitType) {
+      if (!physiatristMap[selectedDateStr] || typeof physiatristMap[selectedDateStr] !== 'object') {
+        physiatristMap[selectedDateStr] = {};
+      }
+      const current = physiatristMap[selectedDateStr][patientId] || null;
+      const patient = patients.find(p => p.id === patientId);
+      const fullName = patient ? `${patient.nombre} ${patient.apellido}` : 'Paciente';
+
+      if (current === visitType || !visitType) {
+        delete physiatristMap[selectedDateStr][patientId];
+        showToast(`Registro de fisiatra retirado para ${fullName}.`, 'info');
+      } else {
+        physiatristMap[selectedDateStr][patientId] = visitType;
+        const label = visitType === 'consulta' ? 'Consulta con Fisiatra' : 'Reconsulta con Fisiatra';
+        showToast(`${label} marcada para ${fullName}.`, 'success');
+      }
+
+      savePhysiatristToStorage();
+      recalculateAndRenderAll();
+    }
+    window.setPhysiatristVisit = setPhysiatristVisit;
+
+    function escapeHtml(unsafe) {
+      if (unsafe === null || unsafe === undefined) return '';
+      return String(unsafe)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+    window.escapeHtml = escapeHtml;
+
+    function updateTotalPatientsBadge() {
+      const badge = document.getElementById('badge-total-pacientes');
+      if (badge) {
+        badge.textContent = patients.length;
+      }
+    }
+
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+
+      const colors = {
+        success: 'bg-emerald-600 text-white border-emerald-700',
+        error: 'bg-rose-600 text-white border-rose-700',
+        info: 'bg-slate-800 text-white border-slate-900'
+      };
+      const icons = {
+        success: 'fa-circle-check',
+        error: 'fa-circle-exclamation',
+        info: 'fa-circle-info'
+      };
+
+      const toast = document.createElement('div');
+      toast.className = `pointer-events-auto flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-lg border text-xs sm:text-sm font-semibold transition-all duration-300 ${colors[type] || colors.info}`;
+      toast.innerHTML = `<i class="fa-solid ${icons[type] || icons.info}"></i><span>${escapeHtml(message)}</span>`;
+
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(8px)';
+        setTimeout(() => toast.remove(), 300);
+      }, 3200);
+    }
+    window.showToast = showToast;
+
+    function downloadFile(content, filename, mimeType) {
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function exportBackupJSON() {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        patients,
+        attendanceMap,
+        physiatristMap
+      };
+      downloadFile(JSON.stringify(payload, null, 2), `Respaldo_SRI_${getTodayISO()}.json`, 'application/json');
+      showToast('Respaldo JSON descargado correctamente.', 'success');
+    }
+    window.exportBackupJSON = exportBackupJSON;
+
+    function importBackupJSON(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        try {
+          const data = JSON.parse(e.target.result);
+          if (Array.isArray(data.patients) && typeof data.attendanceMap === 'object') {
+            patients = data.patients;
+            attendanceMap = data.attendanceMap;
+            physiatristMap = typeof data.physiatristMap === 'object' && data.physiatristMap !== null
+              ? data.physiatristMap
+              : {};
+            savePatientsToStorage();
+            saveAttendanceToStorage();
+            savePhysiatristToStorage();
+            recalculateAndRenderAll();
+            renderPatientsCards();
+            showToast('Respaldo restaurado con éxito.', 'success');
+          } else {
+            showToast('El archivo JSON no tiene un formato válido.', 'error');
+          }
+        } catch (err) {
+          showToast('Error al leer el archivo JSON.', 'error');
+        }
+        event.target.value = '';
+      };
+      reader.readAsText(file);
+    }
+    window.importBackupJSON = importBackupJSON;
+
+    document.addEventListener('DOMContentLoaded', () => {
+      loadDataFromStorage();
+      setSelectedDate(selectedDateStr);
+      updateTotalPatientsBadge();
+    });
+
+    function getTodayISO() {
+      const now = new Date();
+      return formatDateToISO(now);
+    }
+
+    function formatDateToISO(dateObj) {
+      const y = dateObj.getFullYear();
+      const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const d = String(dateObj.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function addDaysToISO(isoStr, days) {
+      const [y, m, d] = isoStr.split('-').map(Number);
+      const dateObj = new Date(y, m - 1, d);
+      dateObj.setDate(dateObj.getDate() + days);
+      return formatDateToISO(dateObj);
+    }
+
+    function formatSpanishDate(isoStr) {
+      const [y, m, d] = isoStr.split('-').map(Number);
+      const dateObj = new Date(y, m - 1, d);
+      const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
+      return dateObj.toLocaleDateString('es-VE', options);
+    }
+
+    function getRelativeLabel(isoStr) {
+      const today = getTodayISO();
+      if (isoStr === today) return ' (HOY)';
+      if (isoStr === addDaysToISO(today, -1)) return ' (AYER)';
+      if (isoStr === addDaysToISO(today, 1)) return ' (MAÑANA)';
+      if (isoStr === addDaysToISO(today, 2)) return ' (PASADO MAÑANA)';
+      return '';
+    }
+
+    function setOffsetDate(offsetDays) {
+      const target = addDaysToISO(getTodayISO(), offsetDays);
+      setSelectedDate(target);
+    }
+    window.setOffsetDate = setOffsetDate;
+
+    function onDatePickerChange(val) {
+      if (val) setSelectedDate(val);
+    }
+    window.onDatePickerChange = onDatePickerChange;
+
+    function setSelectedDate(isoStr) {
+      selectedDateStr = isoStr;
+      document.getElementById('date-picker').value = isoStr;
+      const physTag = isPhysiatristDay(isoStr) ? ' · [DÍA DE FISIATRA: MARTES/JUEVES]' : '';
+      document.getElementById('fecha-legible-titulo').textContent =
+        formatSpanishDate(isoStr) + getRelativeLabel(isoStr) + physTag;
+
+      const today = getTodayISO();
+      const btnConfigs = [
+        { id: 'btn-date-ayer', target: addDaysToISO(today, -1) },
+        { id: 'btn-date-hoy', target: today },
+        { id: 'btn-date-manana', target: addDaysToISO(today, 1) },
+        { id: 'btn-date-pasado', target: addDaysToISO(today, 2) }
+      ];
+
+      btnConfigs.forEach(cfg => {
+        const el = document.getElementById(cfg.id);
+        if (!el) return;
+        if (cfg.target === isoStr) {
+          el.className = 'px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold border border-clinical-600 bg-clinical-600 text-white shadow-sm transition';
+        } else {
+          el.className = 'px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 transition';
+        }
+      });
+
+      recalculateAndRenderAll();
+    }
+    window.setSelectedDate = setSelectedDate;
+
+    function getInitialDemoPatients() {
+      return [
+        {
+          id: 'pac-demo-1',
+          numeroTarjeta: '0001',
+          nombre: 'María Elena',
+          apellido: 'González Pérez',
+          cedula: '14.520.310',
+          edad: 68,
+          sexo: 'F',
+          modalidades: ['Electroterapia', 'Termoterapia', 'Gimnasio'],
+          modalidadesCantidad: { Electroterapia: 2, Termoterapia: 1 },
+          sesionesMeta: 10,
+          diagnostico: 'Lumbalgia crónica y gonartrosis'
+        },
+        {
+          id: 'pac-demo-2',
+          numeroTarjeta: '0002',
+          nombre: 'Carlos Alberto',
+          apellido: 'Rojas Mendoza',
+          cedula: '16.890.442',
+          edad: 42,
+          sexo: 'M',
+          modalidades: ['Magnetoterapia', 'Gimnasio'],
+          modalidadesCantidad: { Magnetoterapia: 1 },
+          sesionesMeta: 10,
+          diagnostico: 'Cervicalgia post-esfuerzo'
+        },
+        {
+          id: 'pac-demo-3',
+          numeroTarjeta: '0003',
+          nombre: 'Sofía Valentina',
+          apellido: 'Herrera Díaz',
+          cedula: '28.110.905',
+          edad: 9,
+          sexo: 'F',
+          modalidades: ['Terapia Ocupacional', 'Foniatría'],
+          modalidadesCantidad: {},
+          sesionesMeta: 10,
+          diagnostico: 'Motricidad fina y articulación del lenguaje'
+        },
+        {
+          id: 'pac-demo-4',
+          numeroTarjeta: '0004',
+          nombre: 'José Gregorio',
+          apellido: 'Castillo Silva',
+          cedula: '11.204.778',
+          edad: 74,
+          sexo: 'M',
+          modalidades: ['Electroterapia', 'Podología', 'Gimnasio'],
+          modalidadesCantidad: { Electroterapia: 1 },
+          sesionesMeta: 10,
+          diagnostico: 'Neuropatía periférica y cuidado podológico'
+        },
+        {
+          id: 'pac-demo-5',
+          numeroTarjeta: '0005',
+          nombre: 'Lucía Andrea',
+          apellido: 'Mendoza Paredes',
+          cedula: '19.743.120',
+          edad: 29,
+          sexo: 'F',
+          modalidades: ['Magnetoterapia', 'Termoterapia', 'MNT'],
+          modalidadesCantidad: { Magnetoterapia: 2, Termoterapia: 1 },
+          sesionesMeta: 10,
+          diagnostico: 'Contractura trapecio y mialgia'
+        }
+      ];
+    }
+
+    function switchTab(tabName) {
+      const tabs = ['asistencia', 'pacientes', 'historial'];
+      tabs.forEach(name => {
+        const viewEl = document.getElementById(`view-${name}`);
+        const navBtn = document.getElementById(`nav-tab-${name}`);
+        const active = name === tabName;
+
+        if (viewEl) {
+          viewEl.classList.toggle('hidden', !active);
+        }
+        if (navBtn) {
+          navBtn.className = active
+            ? 'flex-1 sm:flex-initial px-3.5 py-2 rounded-lg text-xs sm:text-sm font-bold bg-white text-clinical-800 shadow-2xs transition flex items-center justify-center gap-1.5'
+            : 'flex-1 sm:flex-initial px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold text-clinical-100 hover:text-white transition flex items-center justify-center gap-1.5';
+        }
+      });
+
+      if (tabName === 'asistencia') {
+        recalculateAndRenderAll();
+      } else if (tabName === 'pacientes') {
+        renderPatientsCards();
+      } else if (tabName === 'historial') {
+        renderHistorialTable();
+      }
+    }
+    window.switchTab = switchTab;
+
+    function loadDataFromStorage() {
+      try {
+        const rawPatients = localStorage.getItem(STORAGE_KEYS.PATIENTS);
+        const rawAttendance = localStorage.getItem(STORAGE_KEYS.ATTENDANCE);
+
+        if (rawPatients) {
+          patients = JSON.parse(rawPatients);
+        } else {
+          patients = getInitialDemoPatients();
+          savePatientsToStorage();
+        }
+
+        if (rawAttendance) {
+          attendanceMap = JSON.parse(rawAttendance);
+        } else {
+          const today = getTodayISO();
+          attendanceMap[today] = [patients[0].id, patients[1].id];
+          saveAttendanceToStorage();
+        }
+
+        const rawPhysiatrist = localStorage.getItem(STORAGE_KEYS.PHYSIATRIST);
+        if (rawPhysiatrist) {
+          physiatristMap = JSON.parse(rawPhysiatrist);
+        } else {
+          physiatristMap = {};
+        }
+      } catch (e) {
+        console.error('Error cargando datos:', e);
+        patients = [];
+        attendanceMap = {};
+        physiatristMap = {};
+      }
+    }
+
+    function savePatientsToStorage() {
+      localStorage.setItem(STORAGE_KEYS.PATIENTS, JSON.stringify(patients));
+      updateTotalPatientsBadge();
+      if (typeof window.syncCollectionToCloud === 'function') {
+        window.syncCollectionToCloud('patients', patients);
+      }
+    }
+
+    function saveAttendanceToStorage() {
+      localStorage.setItem(STORAGE_KEYS.ATTENDANCE, JSON.stringify(attendanceMap));
+      if (typeof window.syncCollectionToCloud === 'function') {
+        window.syncCollectionToCloud('attendance', attendanceMap);
+      }
+    }
+
+    function savePhysiatristToStorage() {
+      localStorage.setItem(STORAGE_KEYS.PHYSIATRIST, JSON.stringify(physiatristMap));
+      if (typeof window.syncCollectionToCloud === 'function') {
+        window.syncCollectionToCloud('physiatrist', physiatristMap);
+      }
+    }
+
+    window.applyRemoteState = function (collectionKey, remoteValue) {
+      if (collectionKey === 'patients' && Array.isArray(remoteValue)) {
+        patients = remoteValue;
+        localStorage.setItem(STORAGE_KEYS.PATIENTS, JSON.stringify(patients));
+        updateTotalPatientsBadge();
+        recalculateAndRenderAll();
+        renderPatientsCards();
+      } else if (collectionKey === 'attendance' && remoteValue && typeof remoteValue === 'object') {
+        attendanceMap = remoteValue;
+        localStorage.setItem(STORAGE_KEYS.ATTENDANCE, JSON.stringify(attendanceMap));
+        recalculateAndRenderAll();
+        renderHistorialTable();
+      } else if (collectionKey === 'physiatrist' && remoteValue && typeof remoteValue === 'object') {
+        physiatristMap = remoteValue;
+        localStorage.setItem(STORAGE_KEYS.PHYSIATRIST, JSON.stringify(physiatristMap));
+        recalculateAndRenderAll();
+        renderHistorialTable();
+      }
+    };
+
+    function getPatientModalityQty(patient, modalityName) {
+      if (!patient || !Array.isArray(patient.modalidades) || !patient.modalidades.includes(modalityName)) {
+        return 0;
+      }
+      const rawQty = patient.modalidadesCantidad && typeof patient.modalidadesCantidad === 'object'
+        ? Number(patient.modalidadesCantidad[modalityName])
+        : 1;
+      return !isNaN(rawQty) && rawQty >= 1 ? Math.floor(rawQty) : 1;
+    }
+
+    function formatPatientModalidadesLabel(patient) {
+      const mods = Array.isArray(patient?.modalidades) ? patient.modalidades : [];
+      if (mods.length === 0) return 'Sin modalidad asignada';
+      return mods.map(m => {
+        if (m === 'Electroterapia' || m === 'Magnetoterapia' || m === 'Termoterapia') {
+          const qty = getPatientModalityQty(patient, m);
+          return qty > 1 ? `${m} (×${qty})` : m;
+        }
+        return m;
+      }).join(', ');
+    }
+
+    function calculateStatsForDate(isoStr) {
+      const attendedIds = Array.isArray(attendanceMap[isoStr]) ? attendanceMap[isoStr] : [];
+      const attendedPatients = patients.filter(p => attendedIds.includes(p.id));
+
+      let femCount = 0;
+      let mascCount = 0;
+      const ageCounts = {};
+      const ageSexCounts = {};
+      AGE_GROUPS.forEach(g => {
+        ageCounts[g.id] = 0;
+        ageSexCounts[g.id] = {
+          M: 0,
+          F: 0,
+          gymPatientsM: 0,
+          gymPatientsF: 0,
+          gymTreatmentsM: 0,
+          gymTreatmentsF: 0,
+          gymTreatments: 0,
+          deptoElectroM: 0,
+          deptoElectroF: 0,
+          deptoElectroTreatments: 0
+        };
+      });
+      let fisioterapiaPatients = 0;
+      let electroTreatments = 0;
+      let magnetoTreatments = 0;
+      let termoTreatments = 0;
+      let gimnasioPatients = 0;
+      let ocupacionalPatients = 0;
+      let mntPatients = 0;
+      let podologiaPatients = 0;
+      let foniatriaPatients = 0;
+      let consultaFisiatraPatients = 0;
+      let reconsultaFisiatraPatients = 0;
+      let totalNonGymTreatments = 0;
+
+      attendedPatients.forEach(p => {
+        const group = getAgeGroup(p.edad);
+        ageCounts[group.id] = (ageCounts[group.id] || 0) + 1;
+
+        const isFem = p.sexo === 'F';
+        const isMasc = p.sexo === 'M';
+
+        if (isFem) {
+          femCount += 1;
+          ageSexCounts[group.id].F += 1;
+        } else if (isMasc) {
+          mascCount += 1;
+          ageSexCounts[group.id].M += 1;
+        }
+
+        const mods = Array.isArray(p.modalidades) ? p.modalidades : [];
+        const qElectro = getPatientModalityQty(p, 'Electroterapia');
+        const qMagneto = getPatientModalityQty(p, 'Magnetoterapia');
+        const qTermo = getPatientModalityQty(p, 'Termoterapia');
+        const hasGym = mods.includes('Gimnasio');
+
+        electroTreatments += qElectro;
+        magnetoTreatments += qMagneto;
+        termoTreatments += qTermo;
+
+        const patientElectroDepto = qElectro + qMagneto;
+        ageSexCounts[group.id].deptoElectroTreatments += patientElectroDepto;
+        ageSexCounts[group.id].gymPatientsM += isMasc ? 1 : 0;
+        ageSexCounts[group.id].gymPatientsF += isFem ? 1 : 0;
+        ageSexCounts[group.id].gymTreatmentsM = ageSexCounts[group.id].gymPatientsM * 6.5;
+        ageSexCounts[group.id].gymTreatmentsF = ageSexCounts[group.id].gymPatientsF * 6.5;
+        ageSexCounts[group.id].gymTreatments = ageSexCounts[group.id].gymTreatmentsM + ageSexCounts[group.id].gymTreatmentsF;
+
+        if (isMasc) {
+          ageSexCounts[group.id].deptoElectroM += patientElectroDepto;
+        } else if (isFem) {
+          ageSexCounts[group.id].deptoElectroF += patientElectroDepto;
+        }
+
+        if (qElectro > 0 || qMagneto > 0 || qTermo > 0 || hasGym) {
+          fisioterapiaPatients += 1;
+        }
+        if (mods.includes('Terapia Ocupacional')) {
+          ocupacionalPatients += 1;
+          totalNonGymTreatments += 1;
+        }
+        if (mods.includes('MNT')) {
+          mntPatients += 1;
+          totalNonGymTreatments += 1;
+        }
+        if (mods.includes('Podología')) {
+          podologiaPatients += 1;
+          totalNonGymTreatments += 1;
+        }
+        if (mods.includes('Foniatría')) {
+          foniatriaPatients += 1;
+          totalNonGymTreatments += 1;
+        }
+
+        totalNonGymTreatments += qElectro + qMagneto + qTermo;
+        gimnasioPatients += 1;
+      });
+
+      const dayPhysMap = physiatristMap[isoStr];
+      if (dayPhysMap && typeof dayPhysMap === 'object') {
+        Object.entries(dayPhysMap).forEach(([pacId, visitType]) => {
+          if (patients.some(p => p.id === pacId)) {
+            if (visitType === 'consulta') consultaFisiatraPatients += 1;
+            if (visitType === 'reconsulta') reconsultaFisiatraPatients += 1;
+          }
+        });
+      }
+
+      const gimnasioTreatments = gimnasioPatients * 6.5;
+      const fisioterapiaTotalTratamientos = electroTreatments + magnetoTreatments + termoTreatments + gimnasioTreatments;
+      const fisiatríaTotal = consultaFisiatraPatients + reconsultaFisiatraPatients;
+      const especialidadesTotal = podologiaPatients + foniatriaPatients + fisiatríaTotal;
+
+      return {
+        totalPatients: attendedPatients.length,
+        totalTreatments: totalNonGymTreatments,
+        fisioterapiaPatients,
+        fisioterapiaTotalTratamientos,
+        electroPatients: electroTreatments,
+        magnetoPatients: magnetoTreatments,
+        termoPatients: termoTreatments,
+        gimnasioPatients,
+        gimnasioTreatments,
+        ocupacionalPatients,
+        mntPatients,
+        podologiaPatients,
+        foniatriaPatients,
+        consultaFisiatraPatients,
+        reconsultaFisiatraPatients,
+        fisiatríaTotal,
+        especialidadesTotal,
+        ageCounts,
+        ageSexCounts,
+        femCount,
+        mascCount
+      };
+    }
+
+    function recalculateAndRenderAll() {
+      const stats = calculateStatsForDate(selectedDateStr);
+      const isPhysDay = isPhysiatristDay(selectedDateStr);
+
+      const totalPacEl = document.getElementById('stat-total-pacientes');
+      const totalSesEl = document.getElementById('stat-total-sesiones');
+      if (totalPacEl) totalPacEl.textContent = stats.totalPatients;
+      if (totalSesEl) totalSesEl.textContent = formatDecimal(stats.totalTreatments + stats.gimnasioTreatments);
+
+      const electroEl = document.getElementById('stat-mod-electro');
+      const magnetoEl = document.getElementById('stat-mod-magneto');
+      const termoEl = document.getElementById('stat-mod-termo');
+      const gymEl = document.getElementById('stat-mod-gimnasio');
+      const ocupEl = document.getElementById('stat-mod-ocupacional');
+      const mntEl = document.getElementById('stat-mod-mnt');
+      const podoFoniaEl = document.getElementById('stat-mod-podo-fonia');
+      const fisiatraEl = document.getElementById('stat-mod-fisiatra');
+
+      if (electroEl) electroEl.textContent = stats.electroPatients;
+      if (magnetoEl) magnetoEl.textContent = stats.magnetoPatients;
+      if (termoEl) termoEl.textContent = stats.termoPatients;
+      if (gymEl) gymEl.textContent = `${stats.gimnasioPatients} (${formatDecimal(stats.gimnasioTreatments)} tr.)`;
+      if (ocupEl) ocupEl.textContent = stats.ocupacionalPatients;
+      if (mntEl) mntEl.textContent = stats.mntPatients;
+      if (podoFoniaEl) podoFoniaEl.textContent = `${stats.podologiaPatients} / ${stats.foniatriaPatients}`;
+      if (fisiatraEl) {
+        fisiatraEl.textContent = `${stats.consultaFisiatraPatients} / ${stats.reconsultaFisiatraPatients}${isPhysDay ? ' (M/J)' : ''}`;
+      }
+
+      const fisioMainEl = document.getElementById('stat-area-fisioterapia');
+      const fisioDetEl = document.getElementById('stat-area-fisioterapia-detalle');
+      const ocupMainEl = document.getElementById('stat-area-ocupacional');
+      const espMainEl = document.getElementById('stat-area-especialidades');
+      const espDetEl = document.getElementById('stat-area-especialidades-detalle');
+
+      if (fisioMainEl) {
+        fisioMainEl.textContent = `${stats.fisioterapiaPatients} pac. · ${formatDecimal(stats.fisioterapiaTotalTratamientos)} tr.`;
+      }
+      if (fisioDetEl) {
+        fisioDetEl.textContent = `Electro: ${stats.electroPatients} · Magneto: ${stats.magnetoPatients} · Termo: ${stats.termoPatients} · Gym: ${stats.gimnasioPatients}`;
+      }
+      if (ocupMainEl) {
+        ocupMainEl.textContent = `${stats.ocupacionalPatients} ${stats.ocupacionalPatients === 1 ? 'paciente' : 'pacientes'}`;
+      }
+      if (espMainEl) {
+        espMainEl.textContent = `${stats.especialidadesTotal} ${stats.especialidadesTotal === 1 ? 'atención' : 'atenciones'}`;
+      }
+      if (espDetEl) {
+        espDetEl.textContent = `Podología: ${stats.podologiaPatients} · Fisiatría: ${stats.fisiatríaTotal} · Foniatría: ${stats.foniatriaPatients}`;
+      }
+
+      const ageContainer = document.getElementById('stat-age-brackets-container');
+      if (ageContainer) {
+        ageContainer.innerHTML = AGE_GROUPS.map(g => {
+          const sexData = stats.ageSexCounts[g.id] || {
+            M: 0,
+            F: 0,
+            gymTreatmentsM: 0,
+            gymTreatmentsF: 0,
+            gymTreatments: 0,
+            deptoElectroM: 0,
+            deptoElectroF: 0,
+            deptoElectroTreatments: 0
+          };
+          const totalGroup = sexData.M + sexData.F;
+          return `
+            <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 flex flex-col justify-between gap-2">
+              <div class="flex items-center justify-between">
+                <span class="font-bold text-slate-800">${escapeHtml(g.label)}</span>
+                <span class="font-extrabold text-clinical-700 bg-clinical-50 px-2 py-0.5 rounded-md border border-clinical-200">${totalGroup}</span>
+              </div>
+              <div class="grid grid-cols-2 gap-1.5 text-[11px] pt-1 border-t border-slate-200/80">
+                <div class="bg-sky-50 text-sky-900 px-2 py-1 rounded-lg flex items-center justify-between font-semibold">
+                  <span>M</span>
+                  <span class="font-extrabold">${sexData.M}</span>
+                </div>
+                <div class="bg-pink-50 text-pink-900 px-2 py-1 rounded-lg flex items-center justify-between font-semibold">
+                  <span>F</span>
+                  <span class="font-extrabold">${sexData.F}</span>
+                </div>
+              </div>
+              <div class="space-y-1.5 text-[10px] pt-1.5 border-t border-slate-200/80">
+                <div class="bg-teal-50/90 border border-teal-100 text-teal-950 px-2 py-1.5 rounded-lg" title="Tratamientos de Gimnasio (×6.5) por sexo">
+                  <div class="flex items-center justify-between font-bold mb-0.5">
+                    <span>Tr. Gym (×6.5):</span>
+                    <span class="font-extrabold text-teal-800">${formatDecimal(sexData.gymTreatments)}</span>
+                  </div>
+                  <div class="flex items-center justify-between text-[10px] font-semibold text-teal-900">
+                    <span>M: <strong>${formatDecimal(sexData.gymTreatmentsM)}</strong></span>
+                    <span>F: <strong>${formatDecimal(sexData.gymTreatmentsF)}</strong></span>
+                  </div>
+                </div>
+                <div class="bg-blue-50/90 border border-blue-100 text-blue-950 px-2 py-1.5 rounded-lg" title="Depto. Electroterapia (Electro + Magneto) por sexo">
+                  <div class="flex items-center justify-between font-bold mb-0.5">
+                    <span>Dpto. Electro:</span>
+                    <span class="font-extrabold text-blue-800">${sexData.deptoElectroTreatments}</span>
+                  </div>
+                  <div class="flex items-center justify-between text-[10px] font-semibold text-blue-900">
+                    <span>M: <strong>${sexData.deptoElectroM}</strong></span>
+                    <span>F: <strong>${sexData.deptoElectroF}</strong></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      const femEl = document.getElementById('stat-fem');
+      const mascEl = document.getElementById('stat-masc');
+      if (femEl) femEl.textContent = stats.femCount;
+      if (mascEl) mascEl.textContent = stats.mascCount;
+
+      renderAsistenciaList();
+    }
+    window.recalculateAndRenderAll = recalculateAndRenderAll;
+
+    function getCumulativeSessions(patientId) {
+      let count = 0;
+      Object.values(attendanceMap).forEach(ids => {
+        if (Array.isArray(ids) && ids.includes(patientId)) {
+          count += 1;
+        }
+      });
+      return count;
+    }
+
+    function toggleAttendance(patientId) {
+      if (!Array.isArray(attendanceMap[selectedDateStr])) {
+        attendanceMap[selectedDateStr] = [];
+      }
+
+      const patient = patients.find(p => p.id === patientId);
+      const fullName = patient ? `${patient.nombre} ${patient.apellido}` : 'Paciente';
+      const idx = attendanceMap[selectedDateStr].indexOf(patientId);
+
+      if (idx >= 0) {
+        attendanceMap[selectedDateStr].splice(idx, 1);
+        saveAttendanceToStorage();
+        showToast(`Asistencia retirada para ${fullName}.`, 'info');
+      } else {
+        attendanceMap[selectedDateStr].push(patientId);
+        saveAttendanceToStorage();
+        const totalAcum = getCumulativeSessions(patientId);
+        const meta = patient && patient.sesionesMeta ? Number(patient.sesionesMeta) : 10;
+
+        if (totalAcum >= meta) {
+          showToast(`¡AVISO DE RECONSULTA! ${fullName} completó sus ${totalAcum}/${meta} sesiones. Pasar a Fisiatra.`, 'error');
+        } else {
+          showToast(`Asistencia marcada para ${fullName} (${totalAcum}/${meta}).`, 'success');
+        }
+      }
+
+      recalculateAndRenderAll();
+    }
+    window.toggleAttendance = toggleAttendance;
+
+    function clearAsistenciaSearch() {
+      const searchEl = document.getElementById('search-asistencia');
+      if (searchEl) {
+        searchEl.value = '';
+        searchEl.focus();
+      }
+      renderAsistenciaList();
+    }
+    window.clearAsistenciaSearch = clearAsistenciaSearch;
+
+    function renderAsistenciaList() {
+      const container = document.getElementById('asistencia-list-container');
+      if (!container) return;
+
+      const searchEl = document.getElementById('search-asistencia');
+      const clearBtn = document.getElementById('btn-clear-search-asistencia');
+      const countBadge = document.getElementById('asistencia-count-badge');
+      const filterOnlyAttendedEl = document.getElementById('filter-solo-asistieron');
+      const query = searchEl ? searchEl.value.trim().toLowerCase() : '';
+      const onlyAttended = filterOnlyAttendedEl ? filterOnlyAttendedEl.checked : false;
+
+      if (clearBtn) {
+        clearBtn.classList.toggle('hidden', query.length === 0);
+      }
+
+      const attendedIds = Array.isArray(attendanceMap[selectedDateStr]) ? attendanceMap[selectedDateStr] : [];
+
+      const filtered = patients.filter(p => {
+        const isAttended = attendedIds.includes(p.id);
+        if (onlyAttended && !isAttended) return false;
+        if (!query) return true;
+        const fullName = `${p.nombre || ''} ${p.apellido || ''}`.toLowerCase();
+        const cedula = String(p.cedula || '').toLowerCase();
+        const numTarjeta = String(p.numeroTarjeta || '').toLowerCase();
+        const diag = String(p.diagnostico || '').toLowerCase();
+        return fullName.includes(query) || cedula.includes(query) || numTarjeta.includes(query) || diag.includes(query);
+      });
+
+      if (countBadge) {
+        countBadge.textContent = `${filtered.length} de ${patients.length}`;
+      }
+
+      if (filtered.length === 0) {
+        container.innerHTML = `
+          <div class="p-8 text-center text-slate-500 text-sm">
+            No se encontraron pacientes que coincidan con el filtro actual.
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = filtered.map(p => {
+        const isAttended = attendedIds.includes(p.id);
+        const ageGroup = getAgeGroup(p.edad);
+        const cumSessions = getCumulativeSessions(p.id);
+        const metaSessions = p.sesionesMeta ? Number(p.sesionesMeta) : 10;
+        const needsReconsulta = cumSessions >= metaSessions;
+        const physVisit = getPhysiatristVisitType(selectedDateStr, p.id);
+        const isPhysDay = isPhysiatristDay(selectedDateStr);
+        const mods = formatPatientModalidadesLabel(p);
+
+        return `
+          <div class="p-4 sm:px-5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 hover:bg-slate-50/80 transition ${needsReconsulta ? 'bg-amber-50/50 border-l-4 border-l-amber-500' : (isPhysDay ? 'bg-emerald-50/20' : '')}">
+            <div class="space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                ${p.numeroTarjeta ? `<span class="text-xs font-extrabold px-2 py-0.5 rounded-md bg-slate-800 text-white">N° ${escapeHtml(p.numeroTarjeta)}</span>` : ''}
+                <span class="font-bold text-slate-900 text-sm sm:text-base">${escapeHtml(p.nombre)} ${escapeHtml(p.apellido)}</span>
+                <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">C.I. ${escapeHtml(p.cedula)}</span>
+                <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-clinical-50 text-clinical-700 border border-clinical-200">${escapeHtml(String(p.edad))} años · ${escapeHtml(ageGroup.label)}</span>
+                <span class="text-xs font-bold px-2 py-0.5 rounded-full ${p.sexo === 'F' ? 'bg-pink-100 text-pink-800' : 'bg-sky-100 text-sky-800'}">${escapeHtml(p.sexo)}</span>
+                ${needsReconsulta ? `<span class="text-xs font-extrabold px-2.5 py-0.5 rounded-full bg-amber-500 text-white shadow-xs animate-pulse"><i class="fa-solid fa-bell mr-1"></i>Listo para Reconsulta (${cumSessions}/${metaSessions})</span>` : ''}
+                ${physVisit === 'consulta' ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">Consulta Fisiatra</span>' : ''}
+                ${physVisit === 'reconsulta' ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">Reconsulta Fisiatra</span>' : ''}
+              </div>
+              <div class="text-xs text-slate-600 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span><strong>Modalidades:</strong> ${escapeHtml(mods)}</span>
+                <span><strong>Asistencias acumuladas:</strong> ${cumSessions} / ${metaSessions}</span>
+                ${p.diagnostico ? `<span><strong>Dx:</strong> ${escapeHtml(p.diagnostico)}</span>` : ''}
+              </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 self-end lg:self-center">
+              <button onclick="setPhysiatristVisit('${escapeHtml(p.id)}', 'consulta')" class="px-3 py-2 rounded-xl text-xs font-bold transition border ${
+                physVisit === 'consulta'
+                  ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
+                  : isPhysDay
+                    ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
+                    : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200'
+              }" title="Marcar Consulta con Fisiatra">
+                Consulta
+              </button>
+              <button onclick="setPhysiatristVisit('${escapeHtml(p.id)}', 'reconsulta')" class="px-3 py-2 rounded-xl text-xs font-bold transition border ${
+                physVisit === 'reconsulta'
+                  ? 'bg-amber-600 text-white border-amber-700 shadow-sm'
+                  : isPhysDay
+                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                    : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200'
+              }" title="Marcar Reconsulta con Fisiatra">
+                Reconsulta
+              </button>
+              <button onclick="toggleAttendance('${escapeHtml(p.id)}')" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition flex items-center gap-2 shadow-sm ${
+                isAttended
+                  ? 'bg-clinical-600 hover:bg-clinical-700 text-white'
+                  : 'bg-white hover:bg-clinical-50 text-clinical-700 border border-clinical-300'
+              }">
+                <i class="fa-solid ${isAttended ? 'fa-check-circle' : 'fa-calendar-plus'}"></i>
+                <span>${isAttended ? 'Asistió' : 'Marcar Asistencia'}</span>
+              </button>
+              <button onclick="openPatientModal('${escapeHtml(p.id)}')" class="p-2.5 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 transition" title="Editar tarjeta">
+                <i class="fa-solid fa-pen"></i>
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+    window.renderAsistenciaList = renderAsistenciaList;
+
+    function renderPatientsCards() {
+      const grid = document.getElementById('pacientes-cards-grid');
+      if (!grid) return;
+
+      const searchEl = document.getElementById('search-pacientes');
+      const query = searchEl ? searchEl.value.trim().toLowerCase() : '';
+
+      const filtered = patients.filter(p => {
+        if (!query) return true;
+        const fullName = `${p.nombre || ''} ${p.apellido || ''}`.toLowerCase();
+        const cedula = String(p.cedula || '').toLowerCase();
+        const numTarjeta = String(p.numeroTarjeta || '').toLowerCase();
+        const diag = String(p.diagnostico || '').toLowerCase();
+        return fullName.includes(query) || cedula.includes(query) || numTarjeta.includes(query) || diag.includes(query);
+      });
+
+      if (filtered.length === 0) {
+        grid.innerHTML = `
+          <div class="col-span-full bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-500 text-sm">
+            No hay tarjetas de pacientes registradas con ese criterio.
+          </div>
+        `;
+        return;
+      }
+
+      grid.innerHTML = filtered.map(p => {
+        const ageGroup = getAgeGroup(p.edad);
+        const cumSessions = getCumulativeSessions(p.id);
+        const metaSessions = p.sesionesMeta ? Number(p.sesionesMeta) : 10;
+        const needsReconsulta = cumSessions >= metaSessions;
+        const mods = Array.isArray(p.modalidades) ? p.modalidades : [];
+
+        return `
+          <article class="bg-white rounded-2xl border ${needsReconsulta ? 'border-amber-400 ring-2 ring-amber-200/60' : 'border-slate-200'} shadow-sm hover:shadow-md transition flex flex-col justify-between overflow-hidden">
+            <div class="p-5 pb-4 space-y-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="flex flex-wrap items-center gap-1.5 mb-1">
+                    ${p.numeroTarjeta ? `<span class="text-[11px] font-extrabold px-2 py-0.5 rounded-md bg-slate-800 text-white tracking-wide">Tarjeta N° ${escapeHtml(p.numeroTarjeta)}</span>` : ''}
+                    <span class="text-[11px] font-bold px-2 py-0.5 rounded-md ${p.sexo === 'F' ? 'bg-pink-100 text-pink-800' : 'bg-sky-100 text-sky-800'}">
+                      ${p.sexo === 'F' ? 'Femenino' : 'Masculino'}
+                    </span>
+                  </div>
+                  <h3 class="font-bold text-slate-900 text-base leading-snug truncate" title="${escapeHtml(p.nombre)} ${escapeHtml(p.apellido)}">
+                    ${escapeHtml(p.nombre)} ${escapeHtml(p.apellido)}
+                  </h3>
+                  <p class="text-xs text-slate-500 font-medium mt-0.5">C.I.: ${escapeHtml(p.cedula)}</p>
+                </div>
+              </div>
+
+              ${needsReconsulta ? `
+                <div class="bg-amber-50 border border-amber-300 text-amber-900 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-2">
+                  <i class="fa-solid fa-bell text-amber-600 shrink-0"></i>
+                  <span>Completó ${cumSessions}/${metaSessions} sesiones — Listo para Reconsulta</span>
+                </div>
+              ` : ''}
+
+              <div class="grid grid-cols-3 gap-2 pt-1">
+                <div class="bg-slate-50 border border-slate-200/80 rounded-xl px-2.5 py-2 text-center">
+                  <span class="block text-[10px] font-bold uppercase text-slate-400">Edad</span>
+                  <span class="text-xs font-extrabold text-slate-800">${escapeHtml(String(p.edad))} años</span>
+                </div>
+                <div class="bg-clinical-50/70 border border-clinical-200/70 rounded-xl px-2.5 py-2 text-center">
+                  <span class="block text-[10px] font-bold uppercase text-clinical-600">Rango</span>
+                  <span class="text-[11px] font-extrabold text-clinical-900">${escapeHtml(ageGroup.label)}</span>
+                </div>
+                <div class="${needsReconsulta ? 'bg-amber-100/80 border-amber-300 text-amber-900' : 'bg-emerald-50/80 border-emerald-200/80 text-emerald-900'} border rounded-xl px-2.5 py-2 text-center">
+                  <span class="block text-[10px] font-bold uppercase opacity-75">Sesiones</span>
+                  <span class="text-xs font-extrabold">${cumSessions} / ${metaSessions}</span>
+                </div>
+              </div>
+
+              <div>
+                <span class="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">Tratamientos Indicados</span>
+                <div class="flex flex-wrap gap-1.5">
+                  ${mods.map(m => {
+                    const qty = (m === 'Electroterapia' || m === 'Magnetoterapia' || m === 'Termoterapia')
+                      ? getPatientModalityQty(p, m)
+                      : 1;
+                    const label = qty > 1 ? `${m} (×${qty})` : m;
+                    return `<span class="text-[11px] font-semibold px-2.5 py-0.5 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-100">${escapeHtml(label)}</span>`;
+                  }).join('')}
+                </div>
+              </div>
+
+              ${p.diagnostico ? `
+                <div class="text-xs text-slate-600 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200/70">
+                  <span class="font-bold text-slate-700">Dx:</span> ${escapeHtml(p.diagnostico)}
+                </div>
+              ` : ''}
+            </div>
+
+            <div class="px-5 py-3 bg-slate-50/90 border-t border-slate-200/80 grid grid-cols-2 gap-2.5">
+              <button onclick="openPatientModal('${escapeHtml(p.id)}')" class="w-full py-2 px-3 rounded-xl bg-white border border-slate-300 hover:bg-clinical-50 hover:border-clinical-300 text-slate-700 hover:text-clinical-800 text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-2xs">
+                <i class="fa-solid fa-pen-to-square text-clinical-600"></i>
+                <span>Editar Tarjeta</span>
+              </button>
+              <button onclick="deletePatient('${escapeHtml(p.id)}')" class="w-full py-2 px-3 rounded-xl bg-white border border-rose-200 hover:bg-rose-50 hover:border-rose-300 text-rose-600 text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-2xs">
+                <i class="fa-solid fa-trash-can"></i>
+                <span>Eliminar</span>
+              </button>
+            </div>
+          </article>
+        `;
+      }).join('');
+    }
+    window.renderPatientsCards = renderPatientsCards;
+
+    function renderHistorialTable() {
+      const tbody = document.getElementById('historial-table-body');
+      if (!tbody) return;
+
+      const allDatesSet = new Set([
+        ...Object.keys(attendanceMap),
+        ...Object.keys(physiatristMap)
+      ]);
+      const dates = Array.from(allDatesSet).sort().reverse();
+      if (dates.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="14" class="py-8 px-4 text-center text-slate-500 text-sm">
+              Aún no hay jornadas con asistencias registradas.
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      tbody.innerHTML = dates.map(dateStr => {
+        const st = calculateStatsForDate(dateStr);
+
+        return `
+          <tr class="hover:bg-slate-50/80 transition">
+            <td class="py-3 px-4 font-semibold text-slate-800 whitespace-nowrap">${escapeHtml(dateStr)}${escapeHtml(getRelativeLabel(dateStr))}</td>
+            <td class="py-3 px-4 text-center font-extrabold text-clinical-700">${st.totalPatients}</td>
+            <td class="py-3 px-4 text-center">${st.electroPatients}</td>
+            <td class="py-3 px-4 text-center">${st.magnetoPatients}</td>
+            <td class="py-3 px-4 text-center">${st.termoPatients}</td>
+            <td class="py-3 px-4 text-center">${st.gimnasioPatients} (${formatDecimal(st.gimnasioTreatments)})</td>
+            <td class="py-3 px-4 text-center">${st.ocupacionalPatients}</td>
+            <td class="py-3 px-4 text-center">${st.mntPatients}</td>
+            <td class="py-3 px-4 text-center">${st.podologiaPatients} / ${st.foniatriaPatients}</td>
+            <td class="py-3 px-4 text-center">${st.consultaFisiatraPatients} / ${st.reconsultaFisiatraPatients}</td>
+            <td class="py-3 px-4 text-center font-semibold text-sky-900">${st.fisioterapiaPatients} (${formatDecimal(st.fisioterapiaTotalTratamientos)} tr.)</td>
+            <td class="py-3 px-4 text-center font-medium">M: ${st.mascCount} / F: ${st.femCount}</td>
+            <td class="py-3 px-4 text-right">
+              <button onclick="setSelectedDate('${escapeHtml(dateStr)}'); switchTab('asistencia');" class="px-3 py-1 rounded-lg bg-clinical-50 hover:bg-clinical-100 text-clinical-700 text-xs font-bold transition">
+                Ver Día
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+    window.renderHistorialTable = renderHistorialTable;
+
+    function toggleModalidadQtyInput(modalityName, isChecked) {
+      const qtyInput = document.getElementById(`qty-${modalityName}`);
+      if (!qtyInput) return;
+      qtyInput.disabled = !isChecked;
+      if (isChecked) {
+        qtyInput.classList.remove('bg-slate-100');
+        qtyInput.classList.add('bg-white');
+        if (!qtyInput.value || Number(qtyInput.value) < 1) {
+          qtyInput.value = '1';
+        }
+      } else {
+        qtyInput.classList.remove('bg-white');
+        qtyInput.classList.add('bg-slate-100');
+        qtyInput.value = '1';
+      }
+    }
+    window.toggleModalidadQtyInput = toggleModalidadQtyInput;
+
+    function updateModalAgeBadge() {
+      const ageInput = document.getElementById('paciente-edad');
+      const badge = document.getElementById('modal-age-badge');
+      if (!ageInput || !badge) return;
+
+      const rawVal = ageInput.value;
+      if (rawVal === '' || rawVal === null || rawVal === undefined) {
+        badge.textContent = 'Ingresa la edad';
+        badge.className = 'text-xs font-bold px-2.5 py-1 rounded-full bg-slate-200 text-slate-700';
+        return;
+      }
+
+      const group = getAgeGroup(Number(rawVal));
+      badge.textContent = `Rango: ${group.label}`;
+      badge.className = 'text-xs font-bold px-2.5 py-1 rounded-full bg-clinical-100 text-clinical-800 border border-clinical-200';
+    }
+    window.updateModalAgeBadge = updateModalAgeBadge;
+
+    function openPatientModal(patientId = null) {
+      const modal = document.getElementById('modal-paciente');
+      const form = document.getElementById('form-paciente');
+      const titleEl = document.getElementById('modal-paciente-title');
+      if (!modal || !form) return;
+
+      form.reset();
+      document.getElementById('paciente-id').value = '';
+      document.getElementById('paciente-numero-tarjeta').value = '';
+      document.getElementById('paciente-sesiones-meta').value = '10';
+
+      const checkboxes = form.querySelectorAll('input[name="modalidad"]');
+      checkboxes.forEach(cb => {
+        cb.checked = false;
+      });
+      ['Electroterapia', 'Magnetoterapia', 'Termoterapia'].forEach(modName => {
+        toggleModalidadQtyInput(modName, false);
+      });
+
+      if (patientId) {
+        const patient = patients.find(p => p.id === patientId);
+        if (!patient) {
+          showToast('No se encontró la tarjeta del paciente.', 'error');
+          return;
+        }
+        if (titleEl) {
+          titleEl.innerHTML = '<i class="fa-solid fa-id-card"></i><span>Editar Tarjeta de Paciente</span>';
+        }
+        document.getElementById('paciente-id').value = patient.id;
+        document.getElementById('paciente-numero-tarjeta').value = patient.numeroTarjeta || '';
+        document.getElementById('paciente-nombre').value = patient.nombre || '';
+        document.getElementById('paciente-apellido').value = patient.apellido || '';
+        document.getElementById('paciente-cedula').value = patient.cedula || '';
+        document.getElementById('paciente-edad').value = patient.edad !== undefined && patient.edad !== null ? patient.edad : '';
+        document.getElementById('paciente-sexo').value = patient.sexo || 'F';
+        document.getElementById('paciente-sesiones-meta').value = patient.sesionesMeta || 10;
+        document.getElementById('paciente-diagnostico').value = patient.diagnostico || '';
+
+        const mods = Array.isArray(patient.modalidades) ? patient.modalidades : [];
+        checkboxes.forEach(cb => {
+          const isChecked = mods.includes(cb.value);
+          cb.checked = isChecked;
+          if (cb.value === 'Electroterapia' || cb.value === 'Magnetoterapia' || cb.value === 'Termoterapia') {
+            toggleModalidadQtyInput(cb.value, isChecked);
+            if (isChecked) {
+              const qtyEl = document.getElementById(`qty-${cb.value}`);
+              if (qtyEl) qtyEl.value = String(getPatientModalityQty(patient, cb.value));
+            }
+          }
+        });
+      } else if (titleEl) {
+        titleEl.innerHTML = '<i class="fa-solid fa-id-card"></i><span>Nueva Tarjeta de Paciente</span>';
+      }
+
+      updateModalAgeBadge();
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      document.getElementById('paciente-nombre').focus();
+    }
+    window.openPatientModal = openPatientModal;
+
+    function closePatientModal() {
+      const modal = document.getElementById('modal-paciente');
+      if (!modal) return;
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+    window.closePatientModal = closePatientModal;
+
+    function savePatient(event) {
+      event.preventDefault();
+
+      try {
+        const idInput = document.getElementById('paciente-id').value.trim();
+        const numeroTarjeta = document.getElementById('paciente-numero-tarjeta').value.trim();
+        const nombre = document.getElementById('paciente-nombre').value.trim();
+        const apellido = document.getElementById('paciente-apellido').value.trim();
+        const cedula = document.getElementById('paciente-cedula').value.trim();
+        const edadNum = Number(document.getElementById('paciente-edad').value);
+        const sexo = document.getElementById('paciente-sexo').value;
+        const sesionesMeta = Number(document.getElementById('paciente-sesiones-meta').value) || 10;
+        const diagnostico = document.getElementById('paciente-diagnostico').value.trim();
+
+        const selectedModalidades = Array.from(
+          document.querySelectorAll('#form-paciente input[name="modalidad"]:checked')
+        ).map(cb => cb.value);
+
+        const modalidadesCantidad = {};
+        ['Electroterapia', 'Magnetoterapia', 'Termoterapia'].forEach(modName => {
+          if (selectedModalidades.includes(modName)) {
+            const qtyEl = document.getElementById(`qty-${modName}`);
+            const qVal = qtyEl ? Number(qtyEl.value) : 1;
+            modalidadesCantidad[modName] = !isNaN(qVal) && qVal >= 1 ? Math.floor(qVal) : 1;
+          }
+        });
+
+        if (!nombre || !apellido || !cedula) {
+          showToast('Completa nombre, apellido y cédula.', 'error');
+          return;
+        }
+
+        if (isNaN(edadNum) || edadNum < 0 || edadNum > 120) {
+          showToast('Ingresa una edad válida entre 0 y 120 años.', 'error');
+          return;
+        }
+
+        if (selectedModalidades.length === 0) {
+          showToast('Selecciona al menos una modalidad o tratamiento.', 'error');
+          return;
+        }
+
+        if (idInput) {
+          const idx = patients.findIndex(p => p.id === idInput);
+          if (idx >= 0) {
+            patients[idx] = {
+              ...patients[idx],
+              numeroTarjeta,
+              nombre,
+              apellido,
+              cedula,
+              edad: edadNum,
+              sexo,
+              modalidades: selectedModalidades,
+              modalidadesCantidad,
+              sesionesMeta,
+              diagnostico
+            };
+            showToast(`Tarjeta actualizada: ${nombre} ${apellido}.`, 'success');
+          }
+        } else {
+          const newPatient = {
+            id: `pac-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            numeroTarjeta,
+            nombre,
+            apellido,
+            cedula,
+            edad: edadNum,
+            sexo,
+            modalidades: selectedModalidades,
+            modalidadesCantidad,
+            sesionesMeta,
+            diagnostico
+          };
+          patients.unshift(newPatient);
+          showToast(`Nuevo paciente registrado: ${nombre} ${apellido}.`, 'success');
+        }
+
+        savePatientsToStorage();
+        closePatientModal();
+        recalculateAndRenderAll();
+        renderPatientsCards();
+      } catch (err) {
+        console.error('Error al guardar paciente:', err);
+        showToast('Ocurrió un error al guardar el paciente.', 'error');
+      }
+    }
+    window.savePatient = savePatient;
+
+    let pendingConfirmAction = null;
+
+    function openConfirmModal(title, message, onConfirm) {
+      const modal = document.getElementById('modal-confirm');
+      const titleEl = document.getElementById('confirm-title');
+      const msgEl = document.getElementById('confirm-message');
+      const okBtn = document.getElementById('confirm-btn-ok');
+      if (!modal || !okBtn) return;
+
+      if (titleEl) titleEl.textContent = title;
+      if (msgEl) msgEl.textContent = message;
+      pendingConfirmAction = onConfirm;
+
+      okBtn.onclick = () => {
+        const fn = pendingConfirmAction;
+        closeConfirmModal();
+        if (typeof fn === 'function') fn();
+      };
+
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeConfirmModal() {
+      const modal = document.getElementById('modal-confirm');
+      pendingConfirmAction = null;
+      if (!modal) return;
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+    window.closeConfirmModal = closeConfirmModal;
+
+    function deletePatient(patientId) {
+      const patient = patients.find(p => p.id === patientId);
+      const nameLabel = patient ? `${patient.nombre} ${patient.apellido}` : 'este paciente';
+
+      openConfirmModal(
+        'Eliminar tarjeta de paciente',
+        `¿Deseas eliminar permanentemente la tarjeta de ${nameLabel} y su historial de asistencia?`,
+        () => {
+          patients = patients.filter(p => p.id !== patientId);
+          Object.keys(attendanceMap).forEach(dateKey => {
+            if (Array.isArray(attendanceMap[dateKey])) {
+              attendanceMap[dateKey] = attendanceMap[dateKey].filter(id => id !== patientId);
+            }
+          });
+          savePatientsToStorage();
+          saveAttendanceToStorage();
+          recalculateAndRenderAll();
+          renderPatientsCards();
+          showToast(`Tarjeta de ${nameLabel} eliminada.`, 'info');
+        }
+      );
+    }
+    window.deletePatient = deletePatient;
+
+    function confirmClearDemoData() {
+      openConfirmModal(
+        'Limpiar todos los datos',
+        'Esto borrará todas las tarjetas de pacientes y registros de asistencia guardados en este navegador. ¿Continuar?',
+        () => {
+          patients = [];
+          attendanceMap = {};
+          physiatristMap = {};
+          savePatientsToStorage();
+          saveAttendanceToStorage();
+          savePhysiatristToStorage();
+          recalculateAndRenderAll();
+          renderPatientsCards();
+          renderHistorialTable();
+          showToast('Todos los datos fueron limpiados.', 'info');
+        }
+      );
+    }
+    window.confirmClearDemoData = confirmClearDemoData;
+
+    function copyWhatsAppReport() {
+      const stats = calculateStatsForDate(selectedDateStr);
+      const isPhysDay = isPhysiatristDay(selectedDateStr);
+      const ageLines = AGE_GROUPS.map(g => {
+        const sx = stats.ageSexCounts[g.id] || {
+          M: 0,
+          F: 0,
+          gymTreatmentsM: 0,
+          gymTreatmentsF: 0,
+          gymTreatments: 0,
+          deptoElectroM: 0,
+          deptoElectroF: 0,
+          deptoElectroTreatments: 0
+        };
+        return `• ${g.label}: M: ${sx.M} | F: ${sx.F} (Total: ${sx.M + sx.F}) — Tr. Gym: ${formatDecimal(sx.gymTreatments)} [M: ${formatDecimal(sx.gymTreatmentsM)} / F: ${formatDecimal(sx.gymTreatmentsF)}] | Dpto. Electro: ${sx.deptoElectroTreatments} [M: ${sx.deptoElectroM} / F: ${sx.deptoElectroF}]`;
+      }).join('\n');
+
+      const reportText = [
+        `*REPORTE DIARIO - SRI SIMÓN BOLÍVAR*`,
+        `📅 Fecha: ${formatSpanishDate(selectedDateStr)} (${selectedDateStr})${isPhysDay ? ' [Martes/Jueves - Fisiatra]' : ''}`,
+        ``,
+        `👥 *Total Pacientes Atendidos:* ${stats.totalPatients}`,
+        `⚧ *Total por Sexo:* Masculino (M): ${stats.mascCount} | Femenino (F): ${stats.femCount}`,
+        ``,
+        `📊 *Rangos de Edad por Sexo (M / F):*`,
+        ageLines,
+        ``,
+        `🩺 *ÁREA DE FISIOTERAPIA (Aparte):* ${stats.fisioterapiaPatients} pacientes · ${formatDecimal(stats.fisioterapiaTotalTratamientos)} tratamientos`,
+        `  - Electroterapia: ${stats.electroPatients}`,
+        `  - Magnetoterapia: ${stats.magnetoPatients}`,
+        `  - Termoterapia: ${stats.termoPatients}`,
+        `  - Gimnasio: ${stats.gimnasioPatients} pacientes (${formatDecimal(stats.gimnasioTreatments)} tratamientos x6.5)`,
+        `  - MNT: ${stats.mntPatients}`,
+        ``,
+        `🧩 *TERAPIA OCUPACIONAL (Aparte):* ${stats.ocupacionalPatients} pacientes`,
+        ``,
+        `🦶🗣️🩺 *PODOLOGÍA, FONIATRÍA Y FISIATRÍA (Aparte):* ${stats.especialidadesTotal} atenciones`,
+        `  - Podología: ${stats.podologiaPatients}`,
+        `  - Foniatría: ${stats.foniatriaPatients}`,
+        `  - Fisiatría: Consulta: ${stats.consultaFisiatraPatients} | Reconsulta: ${stats.reconsultaFisiatraPatients}`
+      ].join('\n');
+
+      const tempTextarea = document.createElement('textarea');
+      tempTextarea.value = reportText;
+      tempTextarea.setAttribute('readonly', '');
+      tempTextarea.style.position = 'absolute';
+      tempTextarea.style.left = '-9999px';
+      document.body.appendChild(tempTextarea);
+      tempTextarea.select();
+
+      try {
+        document.execCommand('copy');
+        showToast('Reporte copiado al portapapeles listo para WhatsApp.', 'success');
+      } catch (err) {
+        showToast('No se pudo copiar el reporte automáticamente.', 'error');
+      } finally {
+        document.body.removeChild(tempTextarea);
+      }
+    }
+    window.copyWhatsAppReport = copyWhatsAppReport;
+
+    function exportDayCSV() {
+      const stats = calculateStatsForDate(selectedDateStr);
+      const ageSexHeaders = AGE_GROUPS.flatMap(g => [`${g.label} (M)`, `${g.label} (F)`]);
+      const headers = [
+        'Fecha',
+        'Total Pacientes',
+        'Masculino (M)',
+        'Femenino (F)',
+        'Fisioterapia Pacientes',
+        'Fisioterapia Tratamientos',
+        'Electroterapia',
+        'Magnetoterapia',
+        'Termoterapia',
+        'Gimnasio Pacientes',
+        'Gimnasio Tratamientos (x6.5)',
+        'MNT',
+        'Terapia Ocupacional',
+        'Podología',
+        'Foniatría',
+        'Consulta Fisiatra',
+        'Reconsulta Fisiatra',
+        ...ageSexHeaders
+      ];
+
+      const ageSexRow = AGE_GROUPS.flatMap(g => {
+        const sx = stats.ageSexCounts[g.id] || { M: 0, F: 0 };
+        return [sx.M, sx.F];
+      });
+
+      const row = [
+        selectedDateStr,
+        stats.totalPatients,
+        stats.mascCount,
+        stats.femCount,
+        stats.fisioterapiaPatients,
+        formatDecimal(stats.fisioterapiaTotalTratamientos),
+        stats.electroPatients,
+        stats.magnetoPatients,
+        stats.termoPatients,
+        stats.gimnasioPatients,
+        formatDecimal(stats.gimnasioTreatments),
+        stats.mntPatients,
+        stats.ocupacionalPatients,
+        stats.podologiaPatients,
+        stats.foniatriaPatients,
+        stats.consultaFisiatraPatients,
+        stats.reconsultaFisiatraPatients,
+        ...ageSexRow
+      ];
+
+      const csvContent = [headers.join(';'), row.join(';')].join('\n');
+      downloadFile('\uFEFF' + csvContent, `Reporte_SRI_${selectedDateStr}.csv`, 'text/csv;charset=utf-8;');
+      showToast('Archivo CSV del día descargado.', 'success');
+    }
+    window.exportDayCSV = exportDayCSV;
+
+    function exportAllHistoryCSV() {
+      const allDatesSet = new Set([
+        ...Object.keys(attendanceMap),
+        ...Object.keys(physiatristMap)
+      ]);
+      const dates = Array.from(allDatesSet).sort();
+      if (dates.length === 0) {
+        showToast('No hay fechas registradas para exportar.', 'info');
+        return;
+      }
+
+      const ageSexHeaders = AGE_GROUPS.flatMap(g => [`${g.label} (M)`, `${g.label} (F)`]);
+      const headers = [
+        'Fecha',
+        'Total Pacientes',
+        'Masculino (M)',
+        'Femenino (F)',
+        'Fisioterapia Pacientes',
+        'Fisioterapia Tratamientos',
+        'Electroterapia',
+        'Magnetoterapia',
+        'Termoterapia',
+        'Gimnasio Pacientes',
+        'Gimnasio Tratamientos (x6.5)',
+        'MNT',
+        'Terapia Ocupacional',
+        'Podología',
+        'Foniatría',
+        'Consulta Fisiatra',
+        'Reconsulta Fisiatra',
+        ...ageSexHeaders
+      ];
+
+      const lines = [headers.join(';')];
+      dates.forEach(dateStr => {
+        const st = calculateStatsForDate(dateStr);
+        const ageSexRow = AGE_GROUPS.flatMap(g => {
+          const sx = st.ageSexCounts[g.id] || { M: 0, F: 0 };
+          return [sx.M, sx.F];
+        });
+        lines.push([
+          dateStr,
+          st.totalPatients,
+          st.mascCount,
+          st.femCount,
+          st.fisioterapiaPatients,
+          formatDecimal(st.fisioterapiaTotalTratamientos),
+          st.electroPatients,
+          st.magnetoPatients,
+          st.termoPatients,
+          st.gimnasioPatients,
+          formatDecimal(st.gimnasioTreatments),
+          st.mntPatients,
+          st.ocupacionalPatients,
+          st.podologiaPatients,
+          st.foniatriaPatients,
+          st.consultaFisiatraPatients,
+          st.reconsultaFisiatraPatients,
+          ...ageSexRow
+        ].join(';'));
+      });
+
+      downloadFile('\uFEFF' + lines.join('\n'), `Consolidado_SRI_${getTodayISO()}.csv`, 'text/csv;charset=utf-8;');
+      showToast('Consolidado multi-día descargado.', 'success');
+    }
+    window.exportAllHistoryCSV = exportAllHistoryCSV;
+  </script>
+</body>
+</html>
