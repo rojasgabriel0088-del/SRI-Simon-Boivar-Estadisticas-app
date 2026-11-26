@@ -12,7 +12,6 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <!-- FontAwesome Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
-
   <!-- Firebase SDK (Módulos ES) para Acceso de Equipo y Sincronización en la Nube -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
@@ -36,9 +35,13 @@
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'sri-simon-bolivar-default';
     let firebaseConfig = null;
     try {
-      firebaseConfig = typeof __firebase_config !== 'undefined' && __firebase_config
-        ? JSON.parse(__firebase_config)
-        : null;
+      if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+        firebaseConfig = typeof __firebase_config === 'string'
+          ? JSON.parse(__firebase_config)
+          : __firebase_config;
+      } else if (window.SRI_FIREBASE_CONFIG && window.SRI_FIREBASE_CONFIG.apiKey && !String(window.SRI_FIREBASE_CONFIG.apiKey).startsWith('PEGA_AQUI')) {
+        firebaseConfig = window.SRI_FIREBASE_CONFIG;
+      }
     } catch (e) {
       console.error('Error al parsear configuración de nube:', e);
     }
@@ -58,6 +61,48 @@
     };
 
     window.cloudBridge = cloudBridge;
+
+    function setCloudStatusBadge(text, mode = 'local') {
+      const badge = document.getElementById('cloud-sync-badge');
+      const userLabel = document.getElementById('cloud-user-label');
+      if (!badge) return;
+
+      const styles = {
+        live: 'bg-emerald-500/20 text-emerald-100 border-emerald-300/40',
+        syncing: 'bg-amber-400/20 text-amber-100 border-amber-300/40',
+        locked: 'bg-rose-500/20 text-rose-100 border-rose-300/40',
+        local: 'bg-white/15 text-clinical-100 border-white/20'
+      };
+
+      badge.className = `text-[11px] font-bold px-2.5 py-1 rounded-full border flex items-center gap-1.5 ${styles[mode] || styles.local}`;
+      badge.innerHTML = `<i class="fa-solid ${mode === 'live' ? 'fa-cloud-check' : mode === 'locked' ? 'fa-lock' : 'fa-cloud'}"></i><span>${window.escapeHtml(text)}</span>`;
+
+      if (userLabel) {
+        if (cloudBridge.teamProfile?.email) {
+          const rolTxt = cloudBridge.teamProfile.rol ? ` (${cloudBridge.teamProfile.rol})` : '';
+          userLabel.textContent = `${cloudBridge.teamProfile.email}${rolTxt}`;
+          userLabel.classList.remove('hidden');
+        } else if (cloudBridge.currentUser && !cloudBridge.currentUser.isAnonymous && cloudBridge.currentUser.email) {
+          userLabel.textContent = cloudBridge.currentUser.email;
+          userLabel.classList.remove('hidden');
+        } else {
+          userLabel.textContent = '';
+          userLabel.classList.add('hidden');
+        }
+      }
+    }
+
+    function showAuthGate(show) {
+      const gate = document.getElementById('auth-gate-overlay');
+      if (!gate) return;
+      if (show) {
+        gate.classList.remove('hidden');
+        gate.classList.add('flex');
+      } else {
+        gate.classList.add('hidden');
+        gate.classList.remove('flex');
+      }
+    }
 
     const ROOM_ACCESS_KEY = 'sri_simon_bolivar_room_unlocked_v1';
     const DEFAULT_ROOM_PIN = 'SRI2026';
@@ -88,48 +133,34 @@
       box.classList.toggle('hidden', !show);
     }
 
-    function setCloudStatusBadge(text, mode = 'local') {
-      const badge = document.getElementById('cloud-sync-badge');
-      const userLabel = document.getElementById('cloud-user-label');
-      if (!badge) return;
+    function toggleAuthMode(mode) {
+      const modeEl = document.getElementById('auth-mode');
+      const tabLogin = document.getElementById('auth-tab-login');
+      const tabRegister = document.getElementById('auth-tab-register');
+      const regFields = document.getElementById('auth-register-fields');
+      const submitBtn = document.getElementById('auth-submit-btn');
 
-      const styles = {
-        live: 'bg-emerald-500/20 text-emerald-100 border-emerald-300/40',
-        syncing: 'bg-amber-400/20 text-amber-100 border-amber-300/40',
-        locked: 'bg-rose-500/20 text-rose-100 border-rose-300/40',
-        local: 'bg-white/15 text-clinical-100 border-white/20'
-      };
+      if (modeEl) modeEl.value = mode;
+      const isRegister = mode === 'register';
 
-      const safeEscape = typeof window.escapeHtml === 'function' ? window.escapeHtml : (s => String(s));
-      badge.className = `text-[11px] font-bold px-2.5 py-1 rounded-full border flex items-center gap-1.5 ${styles[mode] || styles.local}`;
-      badge.innerHTML = `<i class="fa-solid ${mode === 'live' ? 'fa-cloud-check' : mode === 'locked' ? 'fa-lock' : 'fa-cloud'}"></i><span>${safeEscape(text)}</span>`;
-
-      if (userLabel) {
-        if (cloudBridge.teamProfile?.email) {
-          const rolTxt = cloudBridge.teamProfile.rol ? ` (${cloudBridge.teamProfile.rol})` : '';
-          userLabel.textContent = `${cloudBridge.teamProfile.email}${rolTxt}`;
-          userLabel.classList.remove('hidden');
-        } else if (cloudBridge.currentUser && !cloudBridge.currentUser.isAnonymous && cloudBridge.currentUser.email) {
-          userLabel.textContent = cloudBridge.currentUser.email;
-          userLabel.classList.remove('hidden');
-        } else {
-          userLabel.textContent = '';
-          userLabel.classList.add('hidden');
-        }
+      if (regFields) {
+        regFields.classList.toggle('hidden', !isRegister);
+      }
+      if (tabLogin && tabRegister) {
+        tabLogin.className = !isRegister
+          ? 'flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition'
+          : 'flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition';
+        tabRegister.className = isRegister
+          ? 'flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition'
+          : 'flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition';
+      }
+      if (submitBtn) {
+        submitBtn.innerHTML = isRegister
+          ? '<i class="fa-solid fa-user-plus"></i><span>Crear Usuario de Sala</span>'
+          : '<i class="fa-solid fa-right-to-bracket"></i><span>Entrar al Sistema del SRI</span>';
       }
     }
-
-    function showAuthGate(show) {
-      const gate = document.getElementById('auth-gate-overlay');
-      if (!gate) return;
-      if (show) {
-        gate.classList.remove('hidden');
-        gate.classList.add('flex');
-      } else {
-        gate.classList.add('hidden');
-        gate.classList.remove('flex');
-      }
-    }
+    window.toggleAuthMode = toggleAuthMode;
 
     function getPublicDocRef(docName) {
       return doc(cloudBridge.db, 'artifacts', cloudBridge.appId, 'public', 'data', 'sri_rehabilitacion', docName);
@@ -352,9 +383,7 @@
       } finally {
         if (btnEl) {
           btnEl.disabled = false;
-          btnEl.innerHTML = mode === 'register'
-            ? '<i class="fa-solid fa-user-plus"></i><span>Registrar Usuario de Sala</span>'
-            : '<i class="fa-solid fa-right-to-bracket"></i><span>Entrar al Sistema del SRI</span>';
+          btnEl.innerHTML = '<i class="fa-solid fa-right-to-bracket"></i><span>Entrar al Sistema del SRI</span>';
         }
       }
     };
@@ -427,9 +456,10 @@
       showAuthGate(true);
     };
 
-    (async function initCloudAndAuth() {
+    function runAuthBootstrap() {
       if (!cloudBridge.enabled) {
         setCloudStatusBadge('Modo Local', 'local');
+        showAuthGate(false);
         return;
       }
 
@@ -437,12 +467,6 @@
         cloudBridge.app = initializeApp(firebaseConfig);
         cloudBridge.auth = getAuth(cloudBridge.app);
         cloudBridge.db = getFirestore(cloudBridge.app);
-
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(cloudBridge.auth);
-        }
 
         onAuthStateChanged(cloudBridge.auth, async (user) => {
           cloudBridge.currentUser = user;
@@ -476,14 +500,33 @@
             showAuthGate(true);
           }
         });
+
+        (async () => {
+          try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
+            } else if (!cloudBridge.auth.currentUser) {
+              await signInAnonymously(cloudBridge.auth);
+            }
+          } catch (authInitErr) {
+            console.warn('No se pudo iniciar sesión inicial automáticamente:', authInitErr);
+            setCloudStatusBadge('Requiere Usuario', 'locked');
+            showAuthGate(true);
+          }
+        })();
       } catch (err) {
         console.error('Error inicializando autenticación y nube:', err);
-        setCloudStatusBadge('Error de conexión', 'locked');
-        showAuthGate(true);
+        setCloudStatusBadge('Modo Local', 'local');
+        showAuthGate(false);
       }
-    })();
-  </script>
+    }
 
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', runAuthBootstrap);
+    } else {
+      runAuthBootstrap();
+    }
+  </script>
   <script>
     tailwind.config = {
       theme: {
@@ -562,6 +605,18 @@
   <!-- Notificación Toast Flotante -->
   <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
+  <!-- Configuración opcional de Firebase para despliegue externo (GitHub Pages) -->
+  <script>
+    window.SRI_FIREBASE_CONFIG = {
+      apiKey: 'AIzaSyCAdcExb81v1SJa-S3-44sbWLs-9BmyESs',
+      authDomain: 'sri-simon-bolivar.firebaseapp.com',
+      projectId: 'sri-simon-bolivar',
+      storageBucket: 'sri-simon-bolivar.firebasestorage.app',
+      messagingSenderId: '359350652215',
+      appId: '1:359350652215:web:295b0957922325f3e8deb2'
+    };
+  </script>
+
   <!-- Pantalla de Acceso con Usuario y Clave Exclusiva del Equipo del SRI -->
   <div id="auth-gate-overlay" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-40 hidden items-center justify-center p-4 overflow-y-auto">
     <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full border border-slate-200 overflow-hidden my-auto">
@@ -624,15 +679,12 @@
           </button>
         </form>
 
-        <!-- Respaldo cuando Correo/Contraseña no está habilitado aún en Firebase -->
-        <div id="auth-fallback-box" class="hidden pt-3 border-t border-slate-200 space-y-2.5">
-          <p class="text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
-            Acceso rápido por Clave de Sala mientras activas Correo/Contraseña en Firebase:
-          </p>
+        <div id="auth-fallback-box" class="hidden pt-3 border-t border-slate-200 space-y-2">
+          <label class="block text-[11px] font-bold text-slate-600 uppercase">Acceso rápido con Clave de Sala</label>
           <div class="flex gap-2">
-            <input type="password" id="auth-room-pin" placeholder="Clave de sala (SRI2026)" class="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
-            <button type="button" onclick="unlockWithRoomPin()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold transition">
-              Entrar con Clave
+            <input type="password" id="auth-room-pin" placeholder="Clave de sala" class="flex-1 px-3 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+            <button type="button" onclick="unlockWithRoomPin()" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold transition">
+              Entrar
             </button>
           </div>
         </div>
@@ -1120,12 +1172,14 @@
   <!-- LÓGICA DE LA APLICACIÓN (JAVASCRIPT)                                  -->
   <!-- ===================================================================== -->
   <script>
+    // Claves de almacenamiento local
     const STORAGE_KEYS = {
       PATIENTS: 'sri_sb_patients_v1',
-      ATTENDANCE: 'sri_sb_attendance_v1',
-      PHYSIATRIST: 'sri_sb_physiatrist_v1'
+      ATTENDANCE: 'sri_sb_attendance_v1', // Estructura: { "YYYY-MM-DD": ["patientId1", "patientId2"] }
+      PHYSIATRIST: 'sri_sb_physiatrist_v1' // Estructura: { "YYYY-MM-DD": { "patientId": "consulta" | "reconsulta" } }
     };
 
+    // Rangos de edad oficiales solicitados para el reporte
     const AGE_GROUPS = [
       { id: '0_1', label: '0 a 1 año', min: 0, max: 1 },
       { id: '1_4', label: '1 a 4 años', min: 1, max: 4 },
@@ -1153,43 +1207,17 @@
       return Number.isInteger(val) ? String(val) : val.toFixed(1).replace('.', ',');
     }
 
+    // Estado global
     let patients = [];
     let attendanceMap = {};
     let physiatristMap = {};
     let selectedDateStr = getTodayISO();
 
-    function toggleAuthMode(mode) {
-      const modeInput = document.getElementById('auth-mode');
-      const regFields = document.getElementById('auth-register-fields');
-      const loginTab = document.getElementById('auth-tab-login');
-      const regTab = document.getElementById('auth-tab-register');
-      const submitBtn = document.getElementById('auth-submit-btn');
-
-      if (modeInput) modeInput.value = mode;
-      if (regFields) regFields.classList.toggle('hidden', mode !== 'register');
-
-      if (loginTab && regTab) {
-        if (mode === 'register') {
-          regTab.className = 'flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition';
-          loginTab.className = 'flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition';
-        } else {
-          loginTab.className = 'flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition';
-          regTab.className = 'flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition';
-        }
-      }
-
-      if (submitBtn) {
-        submitBtn.innerHTML = mode === 'register'
-          ? '<i class="fa-solid fa-user-plus"></i><span>Registrar Usuario de Sala</span>'
-          : '<i class="fa-solid fa-right-to-bracket"></i><span>Entrar al Sistema del SRI</span>';
-      }
-    }
-    window.toggleAuthMode = toggleAuthMode;
-
     function isPhysiatristDay(isoStr) {
       if (!isoStr) return false;
       const [y, m, d] = isoStr.split('-').map(Number);
       const dayOfWeek = new Date(y, m - 1, d).getDay();
+      // 2 = Martes, 4 = Jueves
       return dayOfWeek === 2 || dayOfWeek === 4;
     }
 
@@ -1222,6 +1250,9 @@
     }
     window.setPhysiatristVisit = setPhysiatristVisit;
 
+    // -------------------------------------------------------------------------
+    // UTILIDADES GENERALES (SEGURIDAD HTML, NOTIFICACIONES, DESCARGAS Y BADGES)
+    // -------------------------------------------------------------------------
     function escapeHtml(unsafe) {
       if (unsafe === null || unsafe === undefined) return '';
       return String(unsafe)
@@ -1266,7 +1297,6 @@
         setTimeout(() => toast.remove(), 300);
       }, 3200);
     }
-    window.showToast = showToast;
 
     function downloadFile(content, filename, mimeType) {
       const blob = new Blob([content], { type: mimeType });
@@ -1290,7 +1320,6 @@
       downloadFile(JSON.stringify(payload, null, 2), `Respaldo_SRI_${getTodayISO()}.json`, 'application/json');
       showToast('Respaldo JSON descargado correctamente.', 'success');
     }
-    window.exportBackupJSON = exportBackupJSON;
 
     function importBackupJSON(event) {
       const file = event.target.files[0];
@@ -1321,14 +1350,17 @@
       };
       reader.readAsText(file);
     }
-    window.importBackupJSON = importBackupJSON;
 
+    // Inicialización al cargar la página
     document.addEventListener('DOMContentLoaded', () => {
       loadDataFromStorage();
       setSelectedDate(selectedDateStr);
       updateTotalPatientsBadge();
     });
 
+    // -------------------------------------------------------------------------
+    // UTILIDADES DE FECHA (YYYY-MM-DD en hora local)
+    // -------------------------------------------------------------------------
     function getTodayISO() {
       const now = new Date();
       return formatDateToISO(now);
@@ -1368,12 +1400,10 @@
       const target = addDaysToISO(getTodayISO(), offsetDays);
       setSelectedDate(target);
     }
-    window.setOffsetDate = setOffsetDate;
 
     function onDatePickerChange(val) {
       if (val) setSelectedDate(val);
     }
-    window.onDatePickerChange = onDatePickerChange;
 
     function setSelectedDate(isoStr) {
       selectedDateStr = isoStr;
@@ -1382,6 +1412,7 @@
       document.getElementById('fecha-legible-titulo').textContent =
         formatSpanishDate(isoStr) + getRelativeLabel(isoStr) + physTag;
 
+      // Actualizar estilo de botones rápidos
       const today = getTodayISO();
       const btnConfigs = [
         { id: 'btn-date-ayer', target: addDaysToISO(today, -1) },
@@ -1402,8 +1433,10 @@
 
       recalculateAndRenderAll();
     }
-    window.setSelectedDate = setSelectedDate;
 
+    // -------------------------------------------------------------------------
+    // PERSISTENCIA Y DATOS DE EJEMPLO REALISTAS
+    // -------------------------------------------------------------------------
     function getInitialDemoPatients() {
       return [
         {
@@ -1509,6 +1542,7 @@
         if (rawPatients) {
           patients = JSON.parse(rawPatients);
         } else {
+          // Cargar 5 pacientes realistas de ejemplo la primera vez
           patients = getInitialDemoPatients();
           savePatientsToStorage();
         }
@@ -1516,6 +1550,7 @@
         if (rawAttendance) {
           attendanceMap = JSON.parse(rawAttendance);
         } else {
+          // Precargar 2 asistencias de ejemplo para hoy
           const today = getTodayISO();
           attendanceMap[today] = [patients[0].id, patients[1].id];
           saveAttendanceToStorage();
@@ -1660,6 +1695,8 @@
         magnetoTreatments += qMagneto;
         termoTreatments += qTermo;
 
+        // Acumular tratamientos por rango de edad y sexo:
+        // Gimnasio x6.5 y Depto. Electroterapia (Electroterapia + Magnetoterapia)
         const patientElectroDepto = qElectro + qMagneto;
         ageSexCounts[group.id].deptoElectroTreatments += patientElectroDepto;
         ageSexCounts[group.id].gymPatientsM += isMasc ? 1 : 0;
@@ -1695,9 +1732,12 @@
         }
 
         totalNonGymTreatments += qElectro + qMagneto + qTermo;
+
+        // En el gimnasio se cuentan absolutamente todos los pacientes que asisten (1 vez por paciente)
         gimnasioPatients += 1;
       });
 
+      // Contabilizar Consulta y Reconsulta con Fisiatra registradas en esa fecha
       const dayPhysMap = physiatristMap[isoStr];
       if (dayPhysMap && typeof dayPhysMap === 'object') {
         Object.entries(dayPhysMap).forEach(([pacId, visitType]) => {
@@ -1708,7 +1748,10 @@
         });
       }
 
+      // El total de tratamientos de gimnasio se calcula multiplicando pacientes por 6.5
       const gimnasioTreatments = gimnasioPatients * 6.5;
+
+      // Electroterapia y Magnetoterapia van completamente por separado
       const fisioterapiaTotalTratamientos = electroTreatments + magnetoTreatments + termoTreatments + gimnasioTreatments;
       const fisiatríaTotal = consultaFisiatraPatients + reconsultaFisiatraPatients;
       const especialidadesTotal = podologiaPatients + foniatriaPatients + fisiatríaTotal;
@@ -1767,6 +1810,7 @@
         fisiatraEl.textContent = `${stats.consultaFisiatraPatients} / ${stats.reconsultaFisiatraPatients}${isPhysDay ? ' (M/J)' : ''}`;
       }
 
+      // Actualizar bloques separados por áreas: Fisioterapia, Terapia Ocupacional y Podología/Fisiatría/Foniatría
       const fisioMainEl = document.getElementById('stat-area-fisioterapia');
       const fisioDetEl = document.getElementById('stat-area-fisioterapia-detalle');
       const ocupMainEl = document.getElementById('stat-area-ocupacional');
@@ -2047,6 +2091,7 @@
 
         return `
           <article class="bg-white rounded-2xl border ${needsReconsulta ? 'border-amber-400 ring-2 ring-amber-200/60' : 'border-slate-200'} shadow-sm hover:shadow-md transition flex flex-col justify-between overflow-hidden">
+            <!-- Encabezado limpio de la tarjeta -->
             <div class="p-5 pb-4 space-y-3">
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
@@ -2070,6 +2115,7 @@
                 </div>
               ` : ''}
 
+              <!-- Datos demográficos y progreso de sesiones -->
               <div class="grid grid-cols-3 gap-2 pt-1">
                 <div class="bg-slate-50 border border-slate-200/80 rounded-xl px-2.5 py-2 text-center">
                   <span class="block text-[10px] font-bold uppercase text-slate-400">Edad</span>
@@ -2085,6 +2131,7 @@
                 </div>
               </div>
 
+              <!-- Modalidades -->
               <div>
                 <span class="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">Tratamientos Indicados</span>
                 <div class="flex flex-wrap gap-1.5">
@@ -2105,6 +2152,7 @@
               ` : ''}
             </div>
 
+            <!-- Pie de tarjeta organizado con acciones alineadas -->
             <div class="px-5 py-3 bg-slate-50/90 border-t border-slate-200/80 grid grid-cols-2 gap-2.5">
               <button onclick="openPatientModal('${escapeHtml(p.id)}')" class="w-full py-2 px-3 rounded-xl bg-white border border-slate-300 hover:bg-clinical-50 hover:border-clinical-300 text-slate-700 hover:text-clinical-800 text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-2xs">
                 <i class="fa-solid fa-pen-to-square text-clinical-600"></i>
@@ -2169,6 +2217,9 @@
     }
     window.renderHistorialTable = renderHistorialTable;
 
+    // -------------------------------------------------------------------------
+    // MODAL DE PACIENTE (CREAR / EDITAR / ELIMINAR)
+    // -------------------------------------------------------------------------
     function toggleModalidadQtyInput(modalityName, isChecked) {
       const qtyInput = document.getElementById(`qty-${modalityName}`);
       if (!qtyInput) return;
@@ -2363,6 +2414,9 @@
     }
     window.savePatient = savePatient;
 
+    // -------------------------------------------------------------------------
+    // MODAL DE CONFIRMACIÓN Y ELIMINACIÓN
+    // -------------------------------------------------------------------------
     let pendingConfirmAction = null;
 
     function openConfirmModal(title, message, onConfirm) {
@@ -2439,6 +2493,9 @@
     }
     window.confirmClearDemoData = confirmClearDemoData;
 
+    // -------------------------------------------------------------------------
+    // REPORTES PARA WHATSAPP Y EXPORTACIÓN CSV
+    // -------------------------------------------------------------------------
     function copyWhatsAppReport() {
       const stats = calculateStatsForDate(selectedDateStr);
       const isPhysDay = isPhysiatristDay(selectedDateStr);
