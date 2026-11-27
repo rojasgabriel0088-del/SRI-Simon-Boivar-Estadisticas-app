@@ -246,7 +246,7 @@
 
       if (enteredPin !== DEFAULT_ROOM_PIN) {
         if (errEl) {
-          errEl.textContent = `Clave incorrecta. La clave de la sala es: ${DEFAULT_ROOM_PIN}`;
+          errEl.textContent = 'Clave incorrecta. Verifica la clave de acceso de la sala.';
           errEl.classList.remove('hidden');
         }
         return;
@@ -461,34 +461,29 @@
             <i class="fa-solid fa-key text-xl text-emerald-300"></i>
           </div>
           <div>
-            <h2 class="text-lg font-extrabold tracking-tight">Clave Única · SRI Simón Bolívar</h2>
-            <p class="text-xs text-clinical-100">Acceso compartido para el personal de la sala de rehabilitación</p>
+            <h2 class="text-lg font-extrabold tracking-tight">Acceso de la Sala · SRI Simón Bolívar</h2>
+            <p class="text-xs text-clinical-100">Solo para el personal autorizado de rehabilitación</p>
           </div>
         </div>
       </div>
 
       <div class="p-6 space-y-4">
-        <div class="bg-clinical-50 border border-clinical-200 rounded-xl px-3.5 py-2.5 text-xs text-clinical-900">
-          <span class="font-bold">Clave de la sala:</span>
-          <code class="font-extrabold ml-1 select-all">SRISimonBolivar26112026</code>
-        </div>
-
         <form id="auth-room-form" onsubmit="handleSingleRoomPinSubmit(event)" class="space-y-3.5">
           <div>
-            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Ingresa la Clave de la Sala *</label>
-            <input type="text" id="auth-room-pin" required placeholder="Ej. SRISimonBolivar26112026" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Clave de Acceso *</label>
+            <input type="password" id="auth-room-pin" required placeholder="Ingresa la clave de la sala" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-clinical-500" />
           </div>
 
           <div id="auth-error-msg" class="hidden text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3.5 py-2.5"></div>
 
           <button type="submit" id="auth-pin-submit-btn" class="w-full py-3 px-4 rounded-xl bg-clinical-600 hover:bg-clinical-700 text-white text-sm font-bold shadow-sm transition flex items-center justify-center gap-2">
             <i class="fa-solid fa-key"></i>
-            <span>Entrar a la Sala con Clave</span>
+            <span>Entrar a la Sala</span>
           </button>
         </form>
 
         <p class="text-[11px] text-slate-500 leading-relaxed bg-slate-50 border border-slate-200/80 rounded-xl p-3">
-          Todos los integrantes de la sala usan esta misma clave para trabajar sobre el registro compartido de pacientes, asistencias y estadísticas.
+          Ingresa la clave compartida del equipo para acceder al registro de pacientes, asistencias y estadísticas.
         </p>
       </div>
     </div>
