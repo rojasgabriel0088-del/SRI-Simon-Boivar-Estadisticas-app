@@ -12,22 +12,19 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <!-- FontAwesome Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
-  <!-- Firebase SDK (Módulos ES) para Acceso de Equipo y Sincronización en la Nube -->
+  <!-- Firebase SDK (Módulos ES) para Sincronización en la Nube de la Sala -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
     import {
       getAuth,
       signInAnonymously,
       signInWithCustomToken,
-      signInWithEmailAndPassword,
-      createUserWithEmailAndPassword,
       signOut,
       onAuthStateChanged
     } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import {
       getFirestore,
       doc,
-      getDoc,
       setDoc,
       onSnapshot
     } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
@@ -46,6 +43,9 @@
       console.error('Error al parsear configuración de nube:', e);
     }
 
+    const ROOM_ACCESS_KEY = 'sri_simon_bolivar_room_unlocked_v1';
+    const DEFAULT_ROOM_PIN = 'SRISimonBolivar26112026';
+
     const cloudBridge = {
       enabled: Boolean(firebaseConfig),
       app: null,
@@ -61,51 +61,7 @@
     };
 
     window.cloudBridge = cloudBridge;
-
-    function setCloudStatusBadge(text, mode = 'local') {
-      const badge = document.getElementById('cloud-sync-badge');
-      const userLabel = document.getElementById('cloud-user-label');
-      if (!badge) return;
-
-      const styles = {
-        live: 'bg-emerald-500/20 text-emerald-100 border-emerald-300/40',
-        syncing: 'bg-amber-400/20 text-amber-100 border-amber-300/40',
-        locked: 'bg-rose-500/20 text-rose-100 border-rose-300/40',
-        local: 'bg-white/15 text-clinical-100 border-white/20'
-      };
-
-      badge.className = `text-[11px] font-bold px-2.5 py-1 rounded-full border flex items-center gap-1.5 ${styles[mode] || styles.local}`;
-      badge.innerHTML = `<i class="fa-solid ${mode === 'live' ? 'fa-cloud-check' : mode === 'locked' ? 'fa-lock' : 'fa-cloud'}"></i><span>${window.escapeHtml(text)}</span>`;
-
-      if (userLabel) {
-        if (cloudBridge.teamProfile?.email) {
-          const rolTxt = cloudBridge.teamProfile.rol ? ` (${cloudBridge.teamProfile.rol})` : '';
-          userLabel.textContent = `${cloudBridge.teamProfile.email}${rolTxt}`;
-          userLabel.classList.remove('hidden');
-        } else if (cloudBridge.currentUser && !cloudBridge.currentUser.isAnonymous && cloudBridge.currentUser.email) {
-          userLabel.textContent = cloudBridge.currentUser.email;
-          userLabel.classList.remove('hidden');
-        } else {
-          userLabel.textContent = '';
-          userLabel.classList.add('hidden');
-        }
-      }
-    }
-
-    function showAuthGate(show) {
-      const gate = document.getElementById('auth-gate-overlay');
-      if (!gate) return;
-      if (show) {
-        gate.classList.remove('hidden');
-        gate.classList.add('flex');
-      } else {
-        gate.classList.add('hidden');
-        gate.classList.remove('flex');
-      }
-    }
-
-    const ROOM_ACCESS_KEY = 'sri_simon_bolivar_room_unlocked_v1';
-    const DEFAULT_ROOM_PIN = 'SRI2026';
+    window.DEFAULT_ROOM_PIN = DEFAULT_ROOM_PIN;
 
     function hasRoomPinSession() {
       try {
@@ -127,66 +83,46 @@
       }
     }
 
-    function showAuthFallback(show) {
-      const box = document.getElementById('auth-fallback-box');
-      if (!box) return;
-      box.classList.toggle('hidden', !show);
-    }
+    function setCloudStatusBadge(text, mode = 'local') {
+      const badge = document.getElementById('cloud-sync-badge');
+      const userLabel = document.getElementById('cloud-user-label');
+      if (!badge) return;
 
-    function toggleAuthMode(mode) {
-      const modeEl = document.getElementById('auth-mode');
-      const tabLogin = document.getElementById('auth-tab-login');
-      const tabRegister = document.getElementById('auth-tab-register');
-      const regFields = document.getElementById('auth-register-fields');
-      const submitBtn = document.getElementById('auth-submit-btn');
+      const styles = {
+        live: 'bg-emerald-500/20 text-emerald-100 border-emerald-300/40',
+        syncing: 'bg-amber-400/20 text-amber-100 border-amber-300/40',
+        locked: 'bg-rose-500/20 text-rose-100 border-rose-300/40',
+        local: 'bg-white/15 text-clinical-100 border-white/20'
+      };
 
-      if (modeEl) modeEl.value = mode;
-      const isRegister = mode === 'register';
+      badge.className = `text-[11px] font-bold px-2.5 py-1 rounded-full border flex items-center gap-1.5 ${styles[mode] || styles.local}`;
+      badge.innerHTML = `<i class="fa-solid ${mode === 'live' ? 'fa-cloud-check' : mode === 'locked' ? 'fa-lock' : 'fa-cloud'}"></i><span>${window.escapeHtml(text)}</span>`;
 
-      if (regFields) {
-        regFields.classList.toggle('hidden', !isRegister);
-      }
-      if (tabLogin && tabRegister) {
-        tabLogin.className = !isRegister
-          ? 'flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition'
-          : 'flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition';
-        tabRegister.className = isRegister
-          ? 'flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition'
-          : 'flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition';
-      }
-      if (submitBtn) {
-        submitBtn.innerHTML = isRegister
-          ? '<i class="fa-solid fa-user-plus"></i><span>Crear Usuario de Sala</span>'
-          : '<i class="fa-solid fa-right-to-bracket"></i><span>Entrar al Sistema del SRI</span>';
+      if (userLabel) {
+        if (hasRoomPinSession() || cloudBridge.teamProfile?.nombre) {
+          userLabel.textContent = cloudBridge.teamProfile?.nombre || 'Sala SRI Simón Bolívar';
+          userLabel.classList.remove('hidden');
+        } else {
+          userLabel.textContent = '';
+          userLabel.classList.add('hidden');
+        }
       }
     }
-    window.toggleAuthMode = toggleAuthMode;
+
+    function showAuthGate(show) {
+      const gate = document.getElementById('auth-gate-overlay');
+      if (!gate) return;
+      if (show) {
+        gate.classList.remove('hidden');
+        gate.classList.add('flex');
+      } else {
+        gate.classList.add('hidden');
+        gate.classList.remove('flex');
+      }
+    }
 
     function getPublicDocRef(docName) {
       return doc(cloudBridge.db, 'artifacts', cloudBridge.appId, 'public', 'data', 'sri_rehabilitacion', docName);
-    }
-
-    function getMemberDocRef(uid) {
-      return doc(cloudBridge.db, 'artifacts', cloudBridge.appId, 'public', 'data', 'sri_equipo', uid);
-    }
-
-    async function verifyTeamMembership(user) {
-      if (!user || user.isAnonymous) return null;
-      const memberRef = getMemberDocRef(user.uid);
-      const snap = await getDoc(memberRef);
-      if (!snap.exists()) {
-        return null;
-      }
-      const data = snap.data();
-      if (data && data.autorizado === false) {
-        return null;
-      }
-      return {
-        uid: user.uid,
-        email: data?.email || user.email || '',
-        nombre: data?.nombre || '',
-        rol: data?.rol || 'Equipo SRI'
-      };
     }
 
     function detachCloudListeners() {
@@ -199,8 +135,7 @@
     }
 
     function startCloudRealtimeListeners() {
-      if (!cloudBridge.enabled || !cloudBridge.db || !cloudBridge.currentUser) return;
-      if (cloudBridge.currentUser.isAnonymous && !hasRoomPinSession()) return;
+      if (!cloudBridge.enabled || !cloudBridge.db || !hasRoomPinSession()) return;
       detachCloudListeners();
       setCloudStatusBadge('Sincronizando...', 'syncing');
 
@@ -225,10 +160,7 @@
         },
         (err) => {
           console.error('Error escuchando pacientes en la nube:', err);
-          setCloudStatusBadge('Error de Nube', 'locked');
-          if (typeof window.showToast === 'function') {
-            window.showToast('No se pudo sincronizar pacientes con la nube.', 'error');
-          }
+          setCloudStatusBadge('Sala Activa (Local)', 'local');
         }
       );
 
@@ -249,7 +181,6 @@
         },
         (err) => {
           console.error('Error escuchando asistencias en la nube:', err);
-          setCloudStatusBadge('Error de Nube', 'locked');
         }
       );
 
@@ -270,16 +201,12 @@
         },
         (err) => {
           console.error('Error escuchando fisiatría en la nube:', err);
-          setCloudStatusBadge('Error de Nube', 'locked');
         }
       );
     }
 
     async function syncCollectionToCloud(collectionKey, value) {
-      if (!cloudBridge.enabled || !cloudBridge.db || !cloudBridge.currentUser || cloudBridge.isApplyingRemote) {
-        return;
-      }
-      if (cloudBridge.currentUser.isAnonymous && !cloudBridge.teamProfile && !hasRoomPinSession()) {
+      if (!cloudBridge.enabled || !cloudBridge.db || !hasRoomPinSession() || cloudBridge.isApplyingRemote) {
         return;
       }
 
@@ -287,7 +214,7 @@
         setCloudStatusBadge('Guardando...', 'syncing');
         const payload = {
           updatedAt: new Date().toISOString(),
-          updatedBy: cloudBridge.teamProfile?.email || (hasRoomPinSession() ? 'Equipo Sala (Clave)' : (cloudBridge.currentUser.email || cloudBridge.currentUser.uid))
+          updatedBy: 'Equipo SRI Simón Bolívar (Clave de Sala)'
         };
         if (collectionKey === 'patients') {
           payload.items = value;
@@ -302,32 +229,24 @@
         setCloudStatusBadge('Nube Sincronizada', 'live');
       } catch (err) {
         console.error(`Error guardando ${collectionKey} en nube:`, err);
-        setCloudStatusBadge('Sin conexión nube', 'locked');
+        setCloudStatusBadge('Sala Activa', 'local');
       }
     }
 
     window.syncCollectionToCloud = syncCollectionToCloud;
 
-    window.handleTeamAuthSubmit = async function (event) {
+    window.handleSingleRoomPinSubmit = async function (event) {
       event.preventDefault();
-      const modeEl = document.getElementById('auth-mode');
-      const emailEl = document.getElementById('auth-email');
-      const passEl = document.getElementById('auth-password');
-      const nombreEl = document.getElementById('auth-nombre');
-      const rolEl = document.getElementById('auth-rol');
+      const pinInput = document.getElementById('auth-room-pin');
       const errEl = document.getElementById('auth-error-msg');
-      const btnEl = document.getElementById('auth-submit-btn');
-
-      if (!emailEl || !passEl) return;
-      const email = emailEl.value.trim();
-      const password = passEl.value;
-      const mode = modeEl ? modeEl.value : 'login';
+      const btnEl = document.getElementById('auth-pin-submit-btn');
+      const enteredPin = pinInput ? pinInput.value.trim() : '';
 
       if (errEl) errEl.classList.add('hidden');
 
-      if (!cloudBridge.enabled || !cloudBridge.auth) {
+      if (enteredPin !== DEFAULT_ROOM_PIN) {
         if (errEl) {
-          errEl.textContent = 'La conexión en la nube no está configurada en este entorno.';
+          errEl.textContent = `Clave incorrecta. La clave de la sala es: ${DEFAULT_ROOM_PIN}`;
           errEl.classList.remove('hidden');
         }
         return;
@@ -336,93 +255,40 @@
       try {
         if (btnEl) {
           btnEl.disabled = true;
-          btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Verificando...</span>';
+          btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Abriendo sala...</span>';
         }
 
-        let cred;
-        if (mode === 'register') {
-          cred = await createUserWithEmailAndPassword(cloudBridge.auth, email, password);
-          const nombre = nombreEl ? nombreEl.value.trim() : '';
-          const rol = rolEl ? rolEl.value : 'Fisioterapeuta';
-          await setDoc(getMemberDocRef(cred.user.uid), {
-            email,
-            nombre,
-            rol,
-            autorizado: true,
-            createdAt: new Date().toISOString()
-          }, { merge: true });
-        } else {
-          cred = await signInWithEmailAndPassword(cloudBridge.auth, email, password);
+        if (cloudBridge.enabled && cloudBridge.auth && !cloudBridge.currentUser) {
+          try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              const cred = await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
+              cloudBridge.currentUser = cred.user;
+            } else {
+              const anonCred = await signInAnonymously(cloudBridge.auth);
+              cloudBridge.currentUser = anonCred.user;
+            }
+          } catch (authErr) {
+            console.warn('Acceso anónimo no habilitado en Firebase; se usará modo de sala:', authErr);
+          }
         }
 
-        const profile = await verifyTeamMembership(cred.user);
-        if (!profile) {
-          await signOut(cloudBridge.auth);
-          throw new Error('Tu usuario no está habilitado dentro del equipo autorizado del SRI Simón Bolívar.');
-        }
+        setRoomPinSession(true);
+        cloudBridge.teamProfile = {
+          nombre: 'Equipo SRI Simón Bolívar',
+          rol: 'Clave Única de Sala'
+        };
 
-        cloudBridge.currentUser = cred.user;
-        cloudBridge.teamProfile = profile;
         showAuthGate(false);
+        setCloudStatusBadge(cloudBridge.enabled ? 'Nube Sincronizada' : 'Sala Activa', cloudBridge.enabled ? 'live' : 'local');
         startCloudRealtimeListeners();
+
         if (typeof window.showToast === 'function') {
-          window.showToast(`Bienvenido/a ${profile.nombre || profile.email} (${profile.rol}).`, 'success');
-        }
-      } catch (err) {
-        console.error('Error de autenticación del equipo:', err);
-        const isProviderDisabled = err && (err.code === 'auth/operation-not-allowed' || String(err.message || '').includes('auth/operation-not-allowed'));
-        if (isProviderDisabled) {
-          showAuthFallback(true);
-        }
-        if (errEl) {
-          errEl.textContent = isProviderDisabled
-            ? 'Firebase tiene desactivado el acceso por Correo/Contraseña (auth/operation-not-allowed). Actívalo en Firebase Console > Authentication > Sign-in method o usa la Clave de Sala aquí abajo.'
-            : (err.message || 'Correo o contraseña incorrectos.');
-          errEl.classList.remove('hidden');
+          window.showToast('Bienvenido al registro compartido de la Sala SRI Simón Bolívar.', 'success');
         }
       } finally {
         if (btnEl) {
           btnEl.disabled = false;
-          btnEl.innerHTML = '<i class="fa-solid fa-right-to-bracket"></i><span>Entrar al Sistema del SRI</span>';
-        }
-      }
-    };
-
-    window.unlockWithRoomPin = async function () {
-      const pinInput = document.getElementById('auth-room-pin');
-      const errEl = document.getElementById('auth-error-msg');
-      const enteredPin = pinInput ? pinInput.value.trim() : '';
-
-      if (enteredPin !== DEFAULT_ROOM_PIN) {
-        if (errEl) {
-          errEl.textContent = 'Clave de sala incorrecta. Verifica con la coordinación o activa Correo/Contraseña en Firebase.';
-          errEl.classList.remove('hidden');
-        }
-        return;
-      }
-
-      try {
-        if (cloudBridge.auth && !cloudBridge.currentUser) {
-          const anonCred = await signInAnonymously(cloudBridge.auth);
-          cloudBridge.currentUser = anonCred.user;
-        }
-        setRoomPinSession(true);
-        cloudBridge.teamProfile = {
-          email: 'equipo.sala@sri',
-          nombre: 'Equipo SRI Simón Bolívar',
-          rol: 'Clave de Sala'
-        };
-        if (errEl) errEl.classList.add('hidden');
-        showAuthGate(false);
-        startCloudRealtimeListeners();
-        if (typeof window.showToast === 'function') {
-          window.showToast('Acceso concedido con Clave de Sala.', 'success');
-        }
-      } catch (err) {
-        console.error('Error al iniciar sesión anónima para sala:', err);
-        if (errEl) {
-          errEl.textContent = 'No se pudo iniciar la sesión de sala en Firebase.';
-          errEl.classList.remove('hidden');
+          btnEl.innerHTML = '<i class="fa-solid fa-key"></i><span>Entrar a la Sala con Clave</span>';
         }
       }
     };
@@ -432,23 +298,22 @@
         detachCloudListeners();
         setRoomPinSession(false);
         cloudBridge.teamProfile = null;
-        if (cloudBridge.auth && cloudBridge.currentUser && !cloudBridge.currentUser.isAnonymous) {
-          await signOut(cloudBridge.auth);
-        }
-        if (cloudBridge.enabled && cloudBridge.auth) {
-          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-            await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
-          } else {
-            await signInAnonymously(cloudBridge.auth);
+        if (cloudBridge.auth && cloudBridge.currentUser) {
+          try {
+            await signOut(cloudBridge.auth);
+          } catch (e) {
+            console.warn('No fue necesario cerrar sesión remota:', e);
           }
         }
+        const pinInput = document.getElementById('auth-room-pin');
+        if (pinInput) pinInput.value = '';
         showAuthGate(true);
-        setCloudStatusBadge('Acceso Bloqueado', 'locked');
+        setCloudStatusBadge('Sala Bloqueada', 'locked');
         if (typeof window.showToast === 'function') {
-          window.showToast('Sesión cerrada. Ingresa con tu usuario y clave.', 'info');
+          window.showToast('Sala bloqueada. Ingresa la clave única para continuar.', 'info');
         }
       } catch (err) {
-        console.error('Error al cerrar sesión:', err);
+        console.error('Error al bloquear sala:', err);
       }
     };
 
@@ -456,69 +321,39 @@
       showAuthGate(true);
     };
 
+    function enforceSingleRoomGate() {
+      if (hasRoomPinSession()) {
+        cloudBridge.teamProfile = {
+          nombre: 'Equipo SRI Simón Bolívar',
+          rol: 'Clave Única de Sala'
+        };
+        showAuthGate(false);
+        setCloudStatusBadge(cloudBridge.enabled ? 'Nube Sincronizada' : 'Sala Activa', cloudBridge.enabled ? 'live' : 'local');
+        startCloudRealtimeListeners();
+      } else {
+        setCloudStatusBadge('Clave de Sala', 'locked');
+        showAuthGate(true);
+      }
+    }
+
     function runAuthBootstrap() {
-      if (!cloudBridge.enabled) {
-        setCloudStatusBadge('Modo Local', 'local');
-        showAuthGate(false);
-        return;
-      }
+      if (cloudBridge.enabled) {
+        try {
+          cloudBridge.app = initializeApp(firebaseConfig);
+          cloudBridge.auth = getAuth(cloudBridge.app);
+          cloudBridge.db = getFirestore(cloudBridge.app);
 
-      try {
-        cloudBridge.app = initializeApp(firebaseConfig);
-        cloudBridge.auth = getAuth(cloudBridge.app);
-        cloudBridge.db = getFirestore(cloudBridge.app);
-
-        onAuthStateChanged(cloudBridge.auth, async (user) => {
-          cloudBridge.currentUser = user;
-          if (!user || user.isAnonymous) {
-            if (user && hasRoomPinSession()) {
-              cloudBridge.teamProfile = {
-                email: 'equipo.sala@sri',
-                nombre: 'Equipo SRI Simón Bolívar',
-                rol: 'Clave de Sala'
-              };
-              showAuthGate(false);
+          onAuthStateChanged(cloudBridge.auth, (user) => {
+            cloudBridge.currentUser = user;
+            if (hasRoomPinSession()) {
               startCloudRealtimeListeners();
-              return;
             }
-            cloudBridge.teamProfile = null;
-            detachCloudListeners();
-            setCloudStatusBadge('Requiere Usuario', 'locked');
-            showAuthGate(true);
-            return;
-          }
-
-          const profile = await verifyTeamMembership(user);
-          if (profile) {
-            cloudBridge.teamProfile = profile;
-            showAuthGate(false);
-            startCloudRealtimeListeners();
-          } else {
-            cloudBridge.teamProfile = null;
-            detachCloudListeners();
-            setCloudStatusBadge('Usuario no autorizado', 'locked');
-            showAuthGate(true);
-          }
-        });
-
-        (async () => {
-          try {
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-              await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
-            } else if (!cloudBridge.auth.currentUser) {
-              await signInAnonymously(cloudBridge.auth);
-            }
-          } catch (authInitErr) {
-            console.warn('No se pudo iniciar sesión inicial automáticamente:', authInitErr);
-            setCloudStatusBadge('Requiere Usuario', 'locked');
-            showAuthGate(true);
-          }
-        })();
-      } catch (err) {
-        console.error('Error inicializando autenticación y nube:', err);
-        setCloudStatusBadge('Modo Local', 'local');
-        showAuthGate(false);
+          });
+        } catch (err) {
+          console.error('Error inicializando Firebase:', err);
+        }
       }
+      enforceSingleRoomGate();
     }
 
     if (document.readyState === 'loading') {
@@ -568,17 +403,17 @@
         </div>
       </div>
 
-      <!-- Estado de Nube, Usuario y Pestañas Principales -->
+      <!-- Estado de Sala y Pestañas Principales -->
       <div class="flex flex-col lg:flex-row lg:items-center gap-2.5 w-full sm:w-auto">
         <div class="flex flex-wrap items-center justify-between sm:justify-end gap-2">
-          <button type="button" onclick="openAuthGateModal()" id="cloud-sync-badge" class="text-[11px] font-bold px-2.5 py-1 rounded-full border bg-white/15 text-clinical-100 border-white/20 flex items-center gap-1.5 transition" title="Estado de sincronización y cuenta del equipo">
-            <i class="fa-solid fa-cloud"></i>
-            <span>Conectando...</span>
+          <button type="button" onclick="openAuthGateModal()" id="cloud-sync-badge" class="text-[11px] font-bold px-2.5 py-1 rounded-full border bg-white/15 text-clinical-100 border-white/20 flex items-center gap-1.5 transition" title="Estado de la sala">
+            <i class="fa-solid fa-lock"></i>
+            <span>Clave de Sala</span>
           </button>
-          <span id="cloud-user-label" class="hidden text-[11px] font-semibold bg-clinical-900/60 border border-white/15 px-2.5 py-1 rounded-full text-emerald-200 truncate max-w-[200px]"></span>
-          <button type="button" onclick="logoutTeamUser()" class="text-[11px] font-bold px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 text-white transition flex items-center gap-1" title="Cambiar usuario o cerrar sesión">
-            <i class="fa-solid fa-right-from-bracket"></i>
-            <span>Salir</span>
+          <span id="cloud-user-label" class="hidden text-[11px] font-semibold bg-clinical-900/60 border border-white/15 px-2.5 py-1 rounded-full text-emerald-200 truncate max-w-[210px]"></span>
+          <button type="button" onclick="logoutTeamUser()" class="text-[11px] font-bold px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 text-white transition flex items-center gap-1" title="Bloquear acceso de la sala">
+            <i class="fa-solid fa-lock"></i>
+            <span>Bloquear</span>
           </button>
         </div>
 
@@ -605,7 +440,7 @@
   <!-- Notificación Toast Flotante -->
   <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
-  <!-- Configuración opcional de Firebase para despliegue externo (GitHub Pages) -->
+  <!-- Configuración de Firebase para despliegue externo (GitHub Pages) -->
   <script>
     window.SRI_FIREBASE_CONFIG = {
       apiKey: 'AIzaSyCAdcExb81v1SJa-S3-44sbWLs-9BmyESs',
@@ -617,80 +452,43 @@
     };
   </script>
 
-  <!-- Pantalla de Acceso con Usuario y Clave Exclusiva del Equipo del SRI -->
+  <!-- Pantalla de Acceso con Clave Única de la Sala -->
   <div id="auth-gate-overlay" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-40 hidden items-center justify-center p-4 overflow-y-auto">
     <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full border border-slate-200 overflow-hidden my-auto">
       <div class="bg-gradient-to-r from-clinical-800 to-clinical-700 text-white px-6 py-5">
         <div class="flex items-center gap-3">
           <div class="w-11 h-11 rounded-xl bg-white/15 border border-white/25 flex items-center justify-center shrink-0">
-            <i class="fa-solid fa-shield-halved text-xl text-emerald-300"></i>
+            <i class="fa-solid fa-key text-xl text-emerald-300"></i>
           </div>
           <div>
-            <h2 class="text-lg font-extrabold tracking-tight">Acceso del Equipo · SRI Simón Bolívar</h2>
-            <p class="text-xs text-clinical-100">Secretaria, fisioterapeutas, jefatura y personal autorizado</p>
+            <h2 class="text-lg font-extrabold tracking-tight">Clave Única · SRI Simón Bolívar</h2>
+            <p class="text-xs text-clinical-100">Acceso compartido para el personal de la sala de rehabilitación</p>
           </div>
         </div>
       </div>
 
       <div class="p-6 space-y-4">
-        <div class="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
-          <button type="button" id="auth-tab-login" onclick="toggleAuthMode('login')" class="flex-1 py-2 text-xs font-bold rounded-lg bg-white text-clinical-800 shadow-2xs transition">
-            Iniciar Sesión
-          </button>
-          <button type="button" id="auth-tab-register" onclick="toggleAuthMode('register')" class="flex-1 py-2 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition">
-            Crear Usuario de Sala
-          </button>
+        <div class="bg-clinical-50 border border-clinical-200 rounded-xl px-3.5 py-2.5 text-xs text-clinical-900">
+          <span class="font-bold">Clave de la sala:</span>
+          <code class="font-extrabold ml-1 select-all">SRISimonBolivar26112026</code>
         </div>
 
-        <form id="auth-team-form" onsubmit="handleTeamAuthSubmit(event)" class="space-y-3.5">
-          <input type="hidden" id="auth-mode" value="login" />
-
-          <div id="auth-register-fields" class="hidden space-y-3">
-            <div>
-              <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre del Trabajador</label>
-              <input type="text" id="auth-nombre" placeholder="Ej. Lic. Ana Pérez" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
-            </div>
-            <div>
-              <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Cargo / Rol en la Sala</label>
-              <select id="auth-rol" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-clinical-500">
-                <option value="Secretaria">Secretaria</option>
-                <option value="Fisioterapeuta">Fisioterapeuta</option>
-                <option value="Jefatura">Jefa / Coordinación</option>
-                <option value="Especialista">Podología / Foniatría / Ocupacional</option>
-              </select>
-            </div>
-          </div>
-
+        <form id="auth-room-form" onsubmit="handleSingleRoomPinSubmit(event)" class="space-y-3.5">
           <div>
-            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Usuario (Correo del Equipo) *</label>
-            <input type="email" id="auth-email" required placeholder="Ej. secretaria.sri@ejemplo.com" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
-          </div>
-
-          <div>
-            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Contraseña / Clave *</label>
-            <input type="password" id="auth-password" required minlength="6" placeholder="Mínimo 6 caracteres" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-clinical-500" />
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Ingresa la Clave de la Sala *</label>
+            <input type="text" id="auth-room-pin" required placeholder="Ej. SRISimonBolivar26112026" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-clinical-500" />
           </div>
 
           <div id="auth-error-msg" class="hidden text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3.5 py-2.5"></div>
 
-          <button type="submit" id="auth-submit-btn" class="w-full py-3 px-4 rounded-xl bg-clinical-600 hover:bg-clinical-700 text-white text-sm font-bold shadow-sm transition flex items-center justify-center gap-2">
-            <i class="fa-solid fa-right-to-bracket"></i>
-            <span>Entrar al Sistema del SRI</span>
+          <button type="submit" id="auth-pin-submit-btn" class="w-full py-3 px-4 rounded-xl bg-clinical-600 hover:bg-clinical-700 text-white text-sm font-bold shadow-sm transition flex items-center justify-center gap-2">
+            <i class="fa-solid fa-key"></i>
+            <span>Entrar a la Sala con Clave</span>
           </button>
         </form>
 
-        <div id="auth-fallback-box" class="hidden pt-3 border-t border-slate-200 space-y-2">
-          <label class="block text-[11px] font-bold text-slate-600 uppercase">Acceso rápido con Clave de Sala</label>
-          <div class="flex gap-2">
-            <input type="password" id="auth-room-pin" placeholder="Clave de sala" class="flex-1 px-3 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-clinical-500" />
-            <button type="button" onclick="unlockWithRoomPin()" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold transition">
-              Entrar
-            </button>
-          </div>
-        </div>
-
         <p class="text-[11px] text-slate-500 leading-relaxed bg-slate-50 border border-slate-200/80 rounded-xl p-3">
-          Los pacientes, asistencias y consultas/reconsultas con fisiatra se sincronizan en tiempo real en la nube para los usuarios autorizados de la sala.
+          Todos los integrantes de la sala usan esta misma clave para trabajar sobre el registro compartido de pacientes, asistencias y estadísticas.
         </p>
       </div>
     </div>
@@ -1172,14 +970,12 @@
   <!-- LÓGICA DE LA APLICACIÓN (JAVASCRIPT)                                  -->
   <!-- ===================================================================== -->
   <script>
-    // Claves de almacenamiento local
     const STORAGE_KEYS = {
       PATIENTS: 'sri_sb_patients_v1',
-      ATTENDANCE: 'sri_sb_attendance_v1', // Estructura: { "YYYY-MM-DD": ["patientId1", "patientId2"] }
-      PHYSIATRIST: 'sri_sb_physiatrist_v1' // Estructura: { "YYYY-MM-DD": { "patientId": "consulta" | "reconsulta" } }
+      ATTENDANCE: 'sri_sb_attendance_v1',
+      PHYSIATRIST: 'sri_sb_physiatrist_v1'
     };
 
-    // Rangos de edad oficiales solicitados para el reporte
     const AGE_GROUPS = [
       { id: '0_1', label: '0 a 1 año', min: 0, max: 1 },
       { id: '1_4', label: '1 a 4 años', min: 1, max: 4 },
@@ -1207,7 +1003,6 @@
       return Number.isInteger(val) ? String(val) : val.toFixed(1).replace('.', ',');
     }
 
-    // Estado global
     let patients = [];
     let attendanceMap = {};
     let physiatristMap = {};
@@ -1217,7 +1012,6 @@
       if (!isoStr) return false;
       const [y, m, d] = isoStr.split('-').map(Number);
       const dayOfWeek = new Date(y, m - 1, d).getDay();
-      // 2 = Martes, 4 = Jueves
       return dayOfWeek === 2 || dayOfWeek === 4;
     }
 
@@ -1250,9 +1044,6 @@
     }
     window.setPhysiatristVisit = setPhysiatristVisit;
 
-    // -------------------------------------------------------------------------
-    // UTILIDADES GENERALES (SEGURIDAD HTML, NOTIFICACIONES, DESCARGAS Y BADGES)
-    // -------------------------------------------------------------------------
     function escapeHtml(unsafe) {
       if (unsafe === null || unsafe === undefined) return '';
       return String(unsafe)
@@ -1351,16 +1142,12 @@
       reader.readAsText(file);
     }
 
-    // Inicialización al cargar la página
     document.addEventListener('DOMContentLoaded', () => {
       loadDataFromStorage();
       setSelectedDate(selectedDateStr);
       updateTotalPatientsBadge();
     });
 
-    // -------------------------------------------------------------------------
-    // UTILIDADES DE FECHA (YYYY-MM-DD en hora local)
-    // -------------------------------------------------------------------------
     function getTodayISO() {
       const now = new Date();
       return formatDateToISO(now);
@@ -1412,7 +1199,6 @@
       document.getElementById('fecha-legible-titulo').textContent =
         formatSpanishDate(isoStr) + getRelativeLabel(isoStr) + physTag;
 
-      // Actualizar estilo de botones rápidos
       const today = getTodayISO();
       const btnConfigs = [
         { id: 'btn-date-ayer', target: addDaysToISO(today, -1) },
@@ -1434,9 +1220,6 @@
       recalculateAndRenderAll();
     }
 
-    // -------------------------------------------------------------------------
-    // PERSISTENCIA Y DATOS DE EJEMPLO REALISTAS
-    // -------------------------------------------------------------------------
     function getInitialDemoPatients() {
       return [
         {
@@ -1542,7 +1325,6 @@
         if (rawPatients) {
           patients = JSON.parse(rawPatients);
         } else {
-          // Cargar 5 pacientes realistas de ejemplo la primera vez
           patients = getInitialDemoPatients();
           savePatientsToStorage();
         }
@@ -1550,7 +1332,6 @@
         if (rawAttendance) {
           attendanceMap = JSON.parse(rawAttendance);
         } else {
-          // Precargar 2 asistencias de ejemplo para hoy
           const today = getTodayISO();
           attendanceMap[today] = [patients[0].id, patients[1].id];
           saveAttendanceToStorage();
@@ -1695,8 +1476,6 @@
         magnetoTreatments += qMagneto;
         termoTreatments += qTermo;
 
-        // Acumular tratamientos por rango de edad y sexo:
-        // Gimnasio x6.5 y Depto. Electroterapia (Electroterapia + Magnetoterapia)
         const patientElectroDepto = qElectro + qMagneto;
         ageSexCounts[group.id].deptoElectroTreatments += patientElectroDepto;
         ageSexCounts[group.id].gymPatientsM += isMasc ? 1 : 0;
@@ -1732,12 +1511,9 @@
         }
 
         totalNonGymTreatments += qElectro + qMagneto + qTermo;
-
-        // En el gimnasio se cuentan absolutamente todos los pacientes que asisten (1 vez por paciente)
         gimnasioPatients += 1;
       });
 
-      // Contabilizar Consulta y Reconsulta con Fisiatra registradas en esa fecha
       const dayPhysMap = physiatristMap[isoStr];
       if (dayPhysMap && typeof dayPhysMap === 'object') {
         Object.entries(dayPhysMap).forEach(([pacId, visitType]) => {
@@ -1748,10 +1524,7 @@
         });
       }
 
-      // El total de tratamientos de gimnasio se calcula multiplicando pacientes por 6.5
       const gimnasioTreatments = gimnasioPatients * 6.5;
-
-      // Electroterapia y Magnetoterapia van completamente por separado
       const fisioterapiaTotalTratamientos = electroTreatments + magnetoTreatments + termoTreatments + gimnasioTreatments;
       const fisiatríaTotal = consultaFisiatraPatients + reconsultaFisiatraPatients;
       const especialidadesTotal = podologiaPatients + foniatriaPatients + fisiatríaTotal;
@@ -1810,7 +1583,6 @@
         fisiatraEl.textContent = `${stats.consultaFisiatraPatients} / ${stats.reconsultaFisiatraPatients}${isPhysDay ? ' (M/J)' : ''}`;
       }
 
-      // Actualizar bloques separados por áreas: Fisioterapia, Terapia Ocupacional y Podología/Fisiatría/Foniatría
       const fisioMainEl = document.getElementById('stat-area-fisioterapia');
       const fisioDetEl = document.getElementById('stat-area-fisioterapia-detalle');
       const ocupMainEl = document.getElementById('stat-area-ocupacional');
@@ -2091,7 +1863,6 @@
 
         return `
           <article class="bg-white rounded-2xl border ${needsReconsulta ? 'border-amber-400 ring-2 ring-amber-200/60' : 'border-slate-200'} shadow-sm hover:shadow-md transition flex flex-col justify-between overflow-hidden">
-            <!-- Encabezado limpio de la tarjeta -->
             <div class="p-5 pb-4 space-y-3">
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
@@ -2115,7 +1886,6 @@
                 </div>
               ` : ''}
 
-              <!-- Datos demográficos y progreso de sesiones -->
               <div class="grid grid-cols-3 gap-2 pt-1">
                 <div class="bg-slate-50 border border-slate-200/80 rounded-xl px-2.5 py-2 text-center">
                   <span class="block text-[10px] font-bold uppercase text-slate-400">Edad</span>
@@ -2131,7 +1901,6 @@
                 </div>
               </div>
 
-              <!-- Modalidades -->
               <div>
                 <span class="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">Tratamientos Indicados</span>
                 <div class="flex flex-wrap gap-1.5">
@@ -2152,7 +1921,6 @@
               ` : ''}
             </div>
 
-            <!-- Pie de tarjeta organizado con acciones alineadas -->
             <div class="px-5 py-3 bg-slate-50/90 border-t border-slate-200/80 grid grid-cols-2 gap-2.5">
               <button onclick="openPatientModal('${escapeHtml(p.id)}')" class="w-full py-2 px-3 rounded-xl bg-white border border-slate-300 hover:bg-clinical-50 hover:border-clinical-300 text-slate-700 hover:text-clinical-800 text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-2xs">
                 <i class="fa-solid fa-pen-to-square text-clinical-600"></i>
@@ -2217,9 +1985,6 @@
     }
     window.renderHistorialTable = renderHistorialTable;
 
-    // -------------------------------------------------------------------------
-    // MODAL DE PACIENTE (CREAR / EDITAR / ELIMINAR)
-    // -------------------------------------------------------------------------
     function toggleModalidadQtyInput(modalityName, isChecked) {
       const qtyInput = document.getElementById(`qty-${modalityName}`);
       if (!qtyInput) return;
@@ -2414,9 +2179,6 @@
     }
     window.savePatient = savePatient;
 
-    // -------------------------------------------------------------------------
-    // MODAL DE CONFIRMACIÓN Y ELIMINACIÓN
-    // -------------------------------------------------------------------------
     let pendingConfirmAction = null;
 
     function openConfirmModal(title, message, onConfirm) {
@@ -2493,9 +2255,6 @@
     }
     window.confirmClearDemoData = confirmClearDemoData;
 
-    // -------------------------------------------------------------------------
-    // REPORTES PARA WHATSAPP Y EXPORTACIÓN CSV
-    // -------------------------------------------------------------------------
     function copyWhatsAppReport() {
       const stats = calculateStatsForDate(selectedDateStr);
       const isPhysDay = isPhysiatristDay(selectedDateStr);
